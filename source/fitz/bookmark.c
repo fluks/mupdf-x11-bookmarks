@@ -8,6 +8,9 @@
 #include <stdbool.h>
 #include <sys/file.h>
 #include <stdarg.h>
+#include <sys/types.h>
+#include <pwd.h>
+#include <limits.h>
 
 /* For each document a docpath and pageno pair is saved in "docpath = pageno" format,
  * each separated by a newline.
@@ -16,7 +19,8 @@
  */
 
 #define BOOKMARKS_FILE ".mupdf_bookmarks"
-static char *get_config_path(void);
+
+static char *get_bookmark_path();
 
 /* temporary file's extension length */
 #define TMP_EXT_LEN 10
@@ -33,7 +37,7 @@ static void file_unlock(FILE *fp);
  * maximum line length in bookmark file
  */
 #define BM_MAX_LINE 5100
-static void get_pageno(FILE *fp, const char *docpath, int *bm_pageno);
+static int get_pageno(FILE *fp, const char *docpath);
 
 static void change_pageno(FILE *bm, FILE *tmp, const char *docpath, int bm_pageno);
 
@@ -42,27 +46,31 @@ static void close_fps(FILE *fps, ...);
 static void free_ptrs(void *ptrs, ...);
 
 int bm_read_bookmark(char *docpath) {
-    char *config_file          = NULL;
-    int bm_pageno              = BM_NO_BOOKMARK;
-    FILE *fp                   = NULL;
-    const char *mode           = "r";
-    
     if (docpath == NULL)
         return BM_NO_BOOKMARK;
 
-    if ((config_file = get_config_path()) == NULL)
-        fputs("can't get config file\n", stderr);
-    else if ((fp = fopen(config_file, mode)) != NULL) {
+    char *bm_file = get_bookmark_path();
+    if (bm_file == NULL) {
+        fputs("can't get bookmark file\n", stderr);
+        return BM_NO_BOOKMARK;
+    }
+
+    int bm_pageno = BM_NO_BOOKMARK;
+    errno = 0;
+    FILE *fp = fopen(bm_file, "r");
+    if (fp != NULL) {
         if (file_lock(fp, LOCK_SH)) {
-            get_pageno(fp, docpath, &bm_pageno);
+            bm_pageno = get_pageno(fp, docpath);
             file_unlock(fp);
         }
-        close_fps(fp, (FILE *)(NULL));
+        errno = 0;
+        if (fclose(fp))
+            perror("fclose");
     }
     else
         perror("fopen");
 
-    free_ptrs(config_file, (void *)(NULL));
+    free(bm_file);
 
     return bm_pageno;
 }
@@ -80,7 +88,7 @@ void bm_save_bookmark(char *docpath, int bm_pageno) {
     if (docpath == NULL || bm_pageno == BM_NO_BOOKMARK)
         return;
 
-    if ((config_file = get_config_path()) == NULL) {
+    if ((config_file = get_bookmark_path()) == NULL) {
         fputs("can't get config file\n", stderr);
         return;
     }
@@ -135,11 +143,12 @@ void bm_save_bookmark(char *docpath, int bm_pageno) {
  * If there are more than one docpaths(something is wrong), only first one is noticed.
  * @param fp already opened pointer to bookmark file
  * @param docpath absolute path of a file to search already saved page number for
- * @param bm_pageno
+ * @return Bookmark's page number or BM_NO_BOOKMARK if not found or something fails.
  */
-static void get_pageno(FILE *fp, const char *docpath, int *bm_pageno) {
-    char line[BM_MAX_LINE]   = { 0 };
+static int get_pageno(FILE *fp, const char *docpath) {
+    char line[BM_MAX_LINE] = { 0 };
     const size_t docpath_len = strlen(docpath);
+    long bm_pageno = BM_NO_BOOKMARK;
 
     while (!feof(fp)) {
         if (fgets(line, BM_MAX_LINE, fp) == NULL)
@@ -148,17 +157,24 @@ static void get_pageno(FILE *fp, const char *docpath, int *bm_pageno) {
             continue;
         if (strncmp(line + docpath_len, SEPARATOR, SEPARATOR_LEN) != 0)
             continue;
-        /* TODO strtol()? setting errno in atoi() wasn't documented */
-        *bm_pageno = atoi(line + docpath_len + SEPARATOR_LEN);
-        /* XXX save old errno, set to zero and set back to old again? */
-        if (errno == ERANGE) {
-            perror("atoi");
-            *bm_pageno = BM_NO_BOOKMARK;
+        errno = 0;
+        bm_pageno = strtol(line + docpath_len + SEPARATOR_LEN, NULL, 10);
+        // TODO Should bm_pageno set to 1 if reading a number fails?
+        if (errno != 0) {
+            bm_pageno = BM_NO_BOOKMARK;
+            perror("strtol");
         }
-        if (*bm_pageno < 1)
-            *bm_pageno = BM_NO_BOOKMARK;
+        else if (bm_pageno > INT_MAX) {
+            bm_pageno = BM_NO_BOOKMARK;
+            fputs("bookmark page number is too big\n", stderr);
+        }
+        else if (bm_pageno < 1) {
+            bm_pageno = BM_NO_BOOKMARK;
+            fputs("bookmark page number is not positive\n", stderr);
+        }
         break;
     }
+    return bm_pageno;
 }
 
 /* Change page number for a document in bookmark file.
@@ -194,80 +210,37 @@ static void change_pageno(FILE *bm, FILE *tmp, const char *docpath, int bm_pagen
         fprintf(tmp, "%s%s%d\n", docpath, SEPARATOR, bm_pageno);
 }
 
-/* Get path for config file, multi-platform. Concatenates home and bookmark file.
+/* Get path to bookmark file. Concatenates home and bookmark file.
  * If NULL is returned, there's no need to free memory, otherwise free it in
  * calling context.
- * @return pointer to path string or NULL if can't get it
+ * @return Pointer to absolute bookmark file string or NULL if can't get it.
  */
-static char *get_config_path(void) {
-    char *config_file = NULL;
-    size_t bm_size    = strlen(BOOKMARKS_FILE);
+static char *get_bookmark_path() {
+    char *home = getenv("HOME");
 
-    #ifdef _WIN32
-        #define USERPROFILE "USERPROFILE"
-        #define HOMEDRIVE "HOMEDRIVE"
-        #define HOMEPATH  "HOMEPATH"
-        char *userprofile = NULL;
-        char *homedrive   = NULL;
-        char *homepath    = NULL;
-        /* 2 because '\' and '\0' */ 
-        size_t size = bm_size + 2;
-
-        if ((userprofile = getenv(USERPROFILE)) != NULL)
-            size += strlen(userprofile);
-        else {
-            fprintf(stderr, "env %s not set\n", USERPROFILE);
-            homedrive = getenv(HOMEDRIVE);
-            homepath  = getenv(HOMEPATH);
-            if (homedrive == NULL || homepath == NULL) {
-                fprintf(stderr, "HOMEDRIVE: %s\nHOMEPATH: %s\n", homedrive, homepath);
-                return NULL;
-            }
-            size += strlen(homedrive) + strlen(homepath);
-        }
-        if ((config_file = malloc(size * sizeof(*config_file))) == NULL) {
-            perror("malloc");
+    if (!home) {
+        fputs("env HOME not set\n", stderr);
+        struct passwd *passwd;
+        errno = 0;
+        if ((passwd = getpwuid(getuid())) == NULL) {
+            perror("getpwnam");
             return NULL;
         }
-        if (userprofile)
-            snprintf(config_file, size, "%s\\%s", userprofile, BOOKMARKS_FILE);
-        else
-            snprintf(config_file, size, "%s%s\\%s", homedrive, homepath, BOOKMARKS_FILE);
-    #elif defined __GNUC__ || defined __APPLE__
-        #include <sys/types.h>
-        #include <pwd.h>
-        #define HOME "HOME"
-        #define USER "USER"
-        struct passwd *passwd = NULL;
-        char *user = NULL;
-        char *home = getenv(HOME);
-
-        if (!home) {
-            fputs("env HOME not set\n", stderr);
-            if ((user = getenv(USER)) == NULL) {
-                fputs("env USER not set\n", stderr);
-                return NULL;
-            }
-            errno = 0;
-            if ((passwd = getpwnam(user)) == NULL) {
-                perror("getpwnam");
-                return NULL;
-            }
-            if ((home = passwd->pw_dir) == NULL) {
-                fputs("pw_dir in passwd is NULL\n", stderr);
-                return NULL;
-            }
-        }
-        /* 2 because '/' and '\0' */
-        size_t size = strlen(home) + bm_size + 2;
-        if ((config_file = malloc(size * sizeof(*config_file))) == NULL) {
-            perror("malloc");
+        if ((home = passwd->pw_dir) == NULL) {
+            fputs("pw_dir in passwd is NULL\n", stderr);
             return NULL;
         }
-        snprintf(config_file, size, "%s/%s", home, BOOKMARKS_FILE);
-    #endif
+    }
+    /* 2 because '/' and '\0' */
+    size_t size = strlen(home) + strlen(BOOKMARKS_FILE) + 2;
+    char *bm_file = malloc(size * sizeof(*bm_file));
+    if (bm_file == NULL) {
+        perror("malloc");
+        return NULL;
+    }
+    snprintf(bm_file, size, "%s/%s", home, BOOKMARKS_FILE);
 
-    return config_file;
+    return bm_file;
 }
 
 /* Generate random extension. Fill buf with: [a-zA-Z0-9]{TMP_EXT_LEN - ext_len - 1}.tmp
@@ -298,12 +271,13 @@ static void random_extension(char *tmp_ext) {
 static bool file_lock(FILE *fp, int operation) {
 /* _XOPEN_SOURCE and _POSIX_C_SOURCE for fileno() */
 #if (defined __GNUC__ || defined __APPLE__) && (defined _XOPEN_SOURCE || defined _POSIX_C_SOURCE)
-#include <sys/file.h>
-    int fd;
-    if ((fd = fileno(fp)) == -1) {
+    errno = 0;
+    int fd = fileno(fp);
+    if (fd == -1) {
         perror("fileno");
         return false;
     }
+    errno = 0;
     if (flock(fd, operation) == -1) {
         perror("flock");
         return false;
@@ -321,11 +295,13 @@ static bool file_lock(FILE *fp, int operation) {
  */
 static void file_unlock(FILE *fp) {
 #if (defined __GNUC__ || defined __APPLE__) && (defined _XOPEN_SOURCE || defined _POSIX_C_SOURCE)
-    int fd;
-    if ((fd = fileno(fp)) == -1) {
+    errno = 0;
+    int fd = fileno(fp);
+    if (fd == -1) {
         perror("fileno");
         return;
     }
+    errno = 0;
     if (flock(fd, LOCK_UN) == -1)
         perror("flock");
 #endif
