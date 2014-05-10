@@ -41,14 +41,14 @@ static void close_fps(FILE *fps, ...);
 
 static void free_ptrs(void *ptrs, ...);
 
-int read_bookmark(char *docpath) {
+int bm_read_bookmark(char *docpath) {
     char *config_file          = NULL;
-    int bm_pageno              = NO_BOOKMARK;
+    int bm_pageno              = BM_NO_BOOKMARK;
     FILE *fp                   = NULL;
     const char *mode           = "r";
     
     if (docpath == NULL)
-        return NO_BOOKMARK;
+        return BM_NO_BOOKMARK;
 
     if ((config_file = get_config_path()) == NULL)
         fputs("can't get config file\n", stderr);
@@ -67,7 +67,7 @@ int read_bookmark(char *docpath) {
     return bm_pageno;
 }
 
-void save_bookmark(char *docpath, int bm_pageno) {
+void bm_save_bookmark(char *docpath, int bm_pageno) {
     char *config_file           = NULL;
     char *backup_config_file    = NULL;
     FILE *fp                    = NULL;
@@ -77,7 +77,7 @@ void save_bookmark(char *docpath, int bm_pageno) {
     FILE *tmp                   = NULL;
     const char *mode_tmp        = "w";
 
-    if (docpath == NULL || bm_pageno == NO_BOOKMARK)
+    if (docpath == NULL || bm_pageno == BM_NO_BOOKMARK)
         return;
 
     if ((config_file = get_config_path()) == NULL) {
@@ -153,10 +153,10 @@ static void get_pageno(FILE *fp, const char *docpath, int *bm_pageno) {
         /* XXX save old errno, set to zero and set back to old again? */
         if (errno == ERANGE) {
             perror("atoi");
-            *bm_pageno = NO_BOOKMARK;
+            *bm_pageno = BM_NO_BOOKMARK;
         }
         if (*bm_pageno < 1)
-            *bm_pageno = NO_BOOKMARK;
+            *bm_pageno = BM_NO_BOOKMARK;
         break;
     }
 }

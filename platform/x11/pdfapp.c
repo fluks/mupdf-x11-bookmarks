@@ -206,10 +206,10 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int bps)
     /* read a bookmark if not reload and if pageno option not given
      * XXX there's no pageno command-line option? */ 
     if (!reload && app->pageno == 1) {
-        if ((app->bookmark_pageno = read_bookmark(app->absolute_docpath)) != NO_BOOKMARK) {
+        if ((app->bookmark_pageno = bm_read_bookmark(app->absolute_docpath)) != BM_NO_BOOKMARK) {
             app->pageno = app->bookmark_pageno;
             /* don't save automatically the old bookmark, only if saved again */
-            app->bookmark_pageno = NO_BOOKMARK;
+            app->bookmark_pageno = BM_NO_BOOKMARK;
         }
     }
 
@@ -363,7 +363,7 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int bps)
 
 void pdfapp_close(pdfapp_t *app)
 {
-    save_bookmark(app->absolute_docpath, app->bookmark_pageno);
+    bm_save_bookmark(app->absolute_docpath, app->bookmark_pageno);
 
     free(app->absolute_docpath);
         app->absolute_docpath = NULL;
