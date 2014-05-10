@@ -3,8 +3,6 @@
 #include "bookmark.h"
 
 #include <ctype.h> /* for tolower() */
-#include <stdlib.h>
-#include <unistd.h>
 
 #define ZOOMSTEP 1.142857
 #define BEYOND_THRESHHOLD 40
@@ -32,30 +30,17 @@ enum
 static void pdfapp_showpage(pdfapp_t *app, int loadpage, int drawpage, int repaint, int transition, int searching);
 static void pdfapp_updatepage(pdfapp_t *app);
 
-/* Get absolute path of the document, or set docpath to NULL if can't
- * get it.
- * @param app
+/* Get absolute path of the document.
  * @param filename
+ * @return Pointer to absolute path of the document or NULL if fails.
  */
-static void absolute_path(pdfapp_t *app, char *filename) {
-    long path_max;
-    const char *cwd = ".";
-
-    /* If compiled with c99, PATH_MAX isn't set. */
-    if ((path_max = pathconf(cwd, _PC_PATH_MAX)) == -1) {
-        perror("_PC_PATH_MAX");
-        return; 
-    }
-    if ((app->absolute_docpath = malloc((path_max + 1) * sizeof(*app->absolute_docpath))) == NULL) {
-        perror("malloc");
-        return;
-    }
-    /* Can't get realpath, docpath set to NULL. This disables bookmarks altogether. */
-    if ((realpath(filename, app->absolute_docpath)) == NULL) {
+static char *absolute_path(const char *filename) {
+    char *path = NULL;
+    errno = 0;
+    /* If fails, bookmarks are disabled altogether. */
+    if ((path = realpath(filename, NULL)) == NULL)
         perror("realpath");
-        free(app->absolute_docpath);
-        app->absolute_docpath = NULL;
-    }
+    return path;
 }
 
 static void pdfapp_warn(pdfapp_t *app, const char *fmt, ...)
@@ -217,7 +202,7 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int bps)
 	fz_context *ctx = app->ctx;
 	char *password = "";
 
-    absolute_path(app, filename);
+    app->absolute_docpath = absolute_path(filename);
     /* read a bookmark if not reload and if pageno option not given
      * XXX there's no pageno command-line option? */ 
     if (!reload && app->pageno == 1) {
