@@ -132,6 +132,10 @@ struct pdfapp_s
 #ifdef HAVE_CURL
 	fz_stream *stream;
 #endif
+
+    /* Bookmark members. */
+    int bookmark_pageno;
+    char *absolute_docpath;
 };
 
 void pdfapp_init(fz_context *ctx, pdfapp_t *app);
