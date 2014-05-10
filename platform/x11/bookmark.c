@@ -11,6 +11,8 @@
 #include <sys/types.h>
 #include <pwd.h>
 #include <limits.h>
+#include <stddef.h>
+#include <assert.h>
 
 /* For each document a docpath and pageno pair is saved in "docpath = pageno" format,
  * each separated by a newline.
@@ -21,15 +23,11 @@
 #define BOOKMARKS_FILE ".mupdf_bookmarks"
 
 static char *get_bookmark_path();
-
 /* temporary file's extension length */
 #define TMP_EXT_LEN 10
 static void random_extension(char *tmp_ext);
-
 static bool file_lock(FILE *fp, int operation);
-
 static void file_unlock(FILE *fp);
-
 /* separate filename and page number with this */
 #define SEPARATOR " = "
 #define SEPARATOR_LEN strlen(SEPARATOR)
@@ -38,12 +36,10 @@ static void file_unlock(FILE *fp);
  */
 #define BM_MAX_LINE 5100
 static int get_pageno(FILE *fp, const char *docpath);
-
 static void change_pageno(FILE *bm, FILE *tmp, const char *docpath, int bm_pageno);
-
 static void close_fps(FILE *fps, ...);
-
 static void free_ptrs(void *ptrs, ...);
+static ssize_t jl_readline(FILE *fp, char **buffer, size_t *size);
 
 int bm_read_bookmark(char *docpath) {
     if (docpath == NULL)
@@ -146,20 +142,23 @@ void bm_save_bookmark(char *docpath, int bm_pageno) {
  * @return Bookmark's page number or BM_NO_BOOKMARK if not found or something fails.
  */
 static int get_pageno(FILE *fp, const char *docpath) {
-    char line[BM_MAX_LINE] = { 0 };
-    const size_t docpath_len = strlen(docpath);
+    char *line = NULL;
+    size_t size = 128;
+    size_t docpath_len = strlen(docpath);
     long bm_pageno = BM_NO_BOOKMARK;
 
-    while (!feof(fp)) {
-        if (fgets(line, BM_MAX_LINE, fp) == NULL)
-            continue;
+    ssize_t read;
+    while ((read = jl_readline(fp, &line, &size)) > 0) {
+        /* Remove newline. */
+        line[read - 1] = '\0';
+        
         if (strncmp(line, docpath, docpath_len) != 0)
             continue;
         if (strncmp(line + docpath_len, SEPARATOR, SEPARATOR_LEN) != 0)
             continue;
         errno = 0;
         bm_pageno = strtol(line + docpath_len + SEPARATOR_LEN, NULL, 10);
-        // TODO Should bm_pageno set to 1 if reading a number fails?
+        /* TODO Should bm_pageno set to 1 if reading a number fails? */
         if (errno != 0) {
             bm_pageno = BM_NO_BOOKMARK;
             perror("strtol");
@@ -174,6 +173,8 @@ static int get_pageno(FILE *fp, const char *docpath) {
         }
         break;
     }
+    free(line);
+
     return bm_pageno;
 }
 
@@ -339,4 +340,59 @@ static void close_fps(FILE *fps, ...) {
         fp = va_arg(ap, FILE *);
     }
     va_end(ap);
+}
+
+#define BUFFER_DEFAULT_SIZE 16
+
+/** Resize buffer.
+ * @param buffer A pointer to a buffer. Can point to NULL, if size is not zero,
+ *               size is the initial buffer size.
+ * @param size A pointer to a new size of the buffer.
+ * @return False if couldn't allocate memory, true otherwise.
+ */
+static bool resize_buffer(char **buffer, size_t *size) {
+    if (!*buffer && *size == 0)
+        *size = BUFFER_DEFAULT_SIZE;
+    char *temp = realloc(*buffer, *size);
+    if (!temp)
+        return false;
+    *buffer = temp;
+
+    return true;
+}
+
+/** Read a line.
+ * @param fp A pointer to a file stream, can't be NULL.
+ * @param buffer A pointer to a buffer to store the line.
+ * @param size A pointer to the size of the buffer. If buffer is not NULL, the
+ *             size can't be zero then. If buffer is NULL, a buffer of size
+ *             length is allocated. @n
+ *             After a call to jl_readline, size is set to the new size of the
+ *             buffer. 
+ * @return Number of chars read or -1 if eof, a file error or memory allocation
+ *         error.
+ * @note Buffer is dynamically allocated, caller should free its memory.
+ */
+static ssize_t jl_readline(FILE *fp, char **buffer, size_t *size) {
+    assert(fp != NULL);
+    assert( (*buffer != NULL && *size > 0) || *buffer == NULL);
+
+    if (!*buffer) {
+        if (!resize_buffer(buffer, size))
+            return -1;
+    }
+
+    char *ret;
+    ptrdiff_t end_of_chars = 0;
+    while ((ret = fgets(*buffer + end_of_chars, *size - end_of_chars, fp)) !=
+           NULL) {
+        const char *nl;
+        if ((nl = memchr(ret, '\n', *size - end_of_chars)) != NULL)
+            return nl - *buffer + 1;
+        end_of_chars = *size - 1;
+        *size *= 2;
+        if (!resize_buffer(buffer, size))
+            return -1;
+    }
+    return -1;
 }
