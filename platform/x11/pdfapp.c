@@ -1,6 +1,5 @@
 #include "pdfapp.h"
 #include "curl_stream.h"
-#include "bookmark.h"
 
 #include <ctype.h> /* for tolower() */
 

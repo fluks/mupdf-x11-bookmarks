@@ -3,6 +3,7 @@
 
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
+#include "mupdf/bookmark.h"
 
 /*
  * Utility object for handling a pdf application / view
