@@ -202,12 +202,11 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int bps)
 	char *password = "";
 
     app->absolute_docpath = absolute_path(filename);
-    /* read a bookmark if not reload and if pageno option not given
-     * XXX there's no pageno command-line option? */ 
-    if (!reload && app->pageno == 1) {
-        if ((app->bookmark_pageno = bm_read_bookmark(app->absolute_docpath)) != BM_NO_BOOKMARK) {
+    if (app->absolute_docpath != NULL && !reload) {
+        app->bookmark_pageno = bm_read_bookmark(app->absolute_docpath);
+        if (app->bookmark_pageno != BM_NO_BOOKMARK) {
             app->pageno = app->bookmark_pageno;
-            /* don't save automatically the old bookmark, only if saved again */
+            /* Save bookmark only if it's changed later on. */
             app->bookmark_pageno = BM_NO_BOOKMARK;
         }
     }
