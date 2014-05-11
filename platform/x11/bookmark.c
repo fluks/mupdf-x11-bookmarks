@@ -225,14 +225,11 @@ static char *get_bookmark_path() {
 }
 
 /* Lock a file.
- * For other platforms than linux and mac, this is a nop.
  * @param fp
  * @param operation a flag for flock. in this program LOCK_SH or LOCK_EX
  * @return boolean indicating was flocking succesful
  */
 static bool file_lock(FILE *fp, int operation) {
-/* _XOPEN_SOURCE and _POSIX_C_SOURCE for fileno() */
-#if (defined __GNUC__ || defined __APPLE__) && (defined _XOPEN_SOURCE || defined _POSIX_C_SOURCE)
     errno = 0;
     int fd = fileno(fp);
     if (fd == -1) {
@@ -244,18 +241,13 @@ static bool file_lock(FILE *fp, int operation) {
         return false;
     }
     return true;
-#else
-    return true;
-#endif
 }
 
 /* Unlock a file previously file_lock():ed.
- * For other platforms than linux and mac, this is a nop. If this fails, fclose follows and
- * hopefully that succeeds clearing the lock.
+ * If this fails, fclose follows and hopefully that succeeds clearing the lock.
  * @param fp
  */
 static void file_unlock(FILE *fp) {
-#if (defined __GNUC__ || defined __APPLE__) && (defined _XOPEN_SOURCE || defined _POSIX_C_SOURCE)
     errno = 0;
     int fd = fileno(fp);
     if (fd == -1) {
@@ -264,7 +256,6 @@ static void file_unlock(FILE *fp) {
     }
     if (flock(fd, LOCK_UN) == -1)
         perror("flock");
-#endif
 }
 
 /** Resize buffer.
