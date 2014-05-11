@@ -110,11 +110,8 @@ void bm_save_bookmark(char *docpath, int bm_pageno) {
 }
 
 /* Get page number from bookmark file.
- * If bookmark for docpath is found, but it's too large for an int or if it's non-positive,
- * return no bookmark found.
- * If there are more than one docpaths(something is wrong), only first one is noticed.
- * @param fp already opened pointer to bookmark file
- * @param docpath absolute path of a file to search already saved page number for
+ * @param fp
+ * @param docpath
  * @return Bookmark's page number or BM_NO_BOOKMARK if not found or something fails.
  */
 static int get_pageno(FILE *fp, const char *docpath) {
