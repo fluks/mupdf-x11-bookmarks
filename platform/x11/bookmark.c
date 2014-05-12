@@ -12,22 +12,22 @@
 #include <stddef.h>
 #include <assert.h>
 
-/* For each document a docpath and pageno pair is saved in "docpath = pageno" format,
- * each separated by a newline.
+/* For each document an absolute docpath and pageno pair is saved in
+ * "docpath = pageno" format, each separated by a newline.
  */
 
 #define BOOKMARKS_FILE ".mupdf_bookmarks"
+/* Separate filename and page number with this. */
+#define SEPARATOR " = "
+#define SEPARATOR_LEN 3
 
 static char *get_bookmark_path();
 static bool file_lock(FILE *fp, int operation);
 static void file_unlock(FILE *fp);
-/* separate filename and page number with this */
-#define SEPARATOR " = "
-#define SEPARATOR_LEN strlen(SEPARATOR)
 static int get_pageno(FILE *fp, const char *docpath);
 static void change_pageno(FILE *bm, FILE *tmp, const char *docpath, int bm_pageno);
 static ssize_t jl_readline(FILE *fp, char **buffer, size_t *size);
-static int copy_file(FILE *source, FILE *dest);
+static void copy_file(FILE *source, FILE *dest);
 static FILE *open_create_if_not_exist(const char *filename);
 
 int bm_read_bookmark(const char *docpath) {
@@ -129,7 +129,6 @@ static int get_pageno(FILE *fp, const char *docpath) {
             continue;
         errno = 0;
         bm_pageno = strtol(line + docpath_len + SEPARATOR_LEN, NULL, 10);
-        /* TODO Should bm_pageno set to 1 if reading a number fails? */
         if (errno != 0) {
             bm_pageno = BM_NO_BOOKMARK;
             perror("strtol");
@@ -179,7 +178,7 @@ static void change_pageno(FILE *bm, FILE *tmp, const char *docpath, int bm_pagen
         fprintf(tmp, "%s%s%d\n", docpath, SEPARATOR, bm_pageno);
         bm_pageno_changed = true;
     }
-    /* docpath not found in bookmark file, add it */
+    /* Docpath not found in bookmark file, add it. */
     if (!bm_pageno_changed)
         fprintf(tmp, "%s%s%d\n", docpath, SEPARATOR, bm_pageno);
 
@@ -221,8 +220,8 @@ static char *get_bookmark_path() {
 
 /* Lock a file.
  * @param fp
- * @param operation a flag for flock. in this program LOCK_SH or LOCK_EX
- * @return boolean indicating was flocking succesful
+ * @param operation A flag for flock. In this program LOCK_SH or LOCK_EX.
+ * @return Boolean indicating was flocking succesful.
  */
 static bool file_lock(FILE *fp, int operation) {
     errno = 0;
@@ -239,7 +238,7 @@ static bool file_lock(FILE *fp, int operation) {
 }
 
 /* Unlock a file previously file_lock():ed.
- * If this fails, fclose follows and hopefully that succeeds clearing the lock.
+ * If this fails, fclose() can release the lock too.
  * @param fp
  */
 static void file_unlock(FILE *fp) {
@@ -307,7 +306,11 @@ static ssize_t jl_readline(FILE *fp, char **buffer, size_t *size) {
     return -1;
 }
 
-static int copy_file(FILE *source, FILE *dest) {
+/* Copy a file.
+ * @param source Source file.
+ * @param dest Destination file.
+ */
+static void copy_file(FILE *source, FILE *dest) {
     const size_t size = 1024;
     char buf[size];
     size_t n;
@@ -321,10 +324,12 @@ static int copy_file(FILE *source, FILE *dest) {
 
     if (fflush(dest) != 0)
         perror("fflush");
-
-    return 0;
 }
 
+/* Open a file for reading and writing. If the file doesn't exist, create it.
+ * @param filename
+ * @return Pointer to a file or NULL if fails.
+ */
 static FILE *open_create_if_not_exist(const char *filename) {
     errno = 0;
     FILE *fp = fopen(filename, "r+");
