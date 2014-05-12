@@ -1,0 +1,6 @@
+- Use functions that mupdf provides.
+
+- Newline in document filename will break bookmark for that document.
+  Newlines can be escaped, but then '\n' in filename escaped to "\\n"
+  is same as "\n" in filename, unless a backslash before 'n' is
+  escaped.
