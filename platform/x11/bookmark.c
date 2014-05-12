@@ -36,7 +36,7 @@ int bm_read_bookmark(const char *docpath) {
 
     char *bm_file = get_bookmark_path();
     if (bm_file == NULL) {
-        fputs("can't get bookmark file\n", stderr);
+        fputs("can't get bookmark filename\n", stderr);
         return BM_NO_BOOKMARK;
     }
 
@@ -49,10 +49,10 @@ int bm_read_bookmark(const char *docpath) {
             file_unlock(fp);
         }
         if (fclose(fp))
-            perror("fclose");
+            fprintf(stderr, "%s; fclose: %s\n", bm_file, strerror(errno));
     }
     else
-        perror("fopen");
+        fprintf(stderr, "%s; fopen: %s\n", bm_file, strerror(errno));
 
     free(bm_file);
 
@@ -65,7 +65,7 @@ void bm_save_bookmark(const char *docpath, int bm_pageno) {
 
     char *bookmark_file = get_bookmark_path();
     if (bookmark_file == NULL) {
-        fputs("can't get bookmark file\n", stderr);
+        fputs("can't get bookmark filename\n", stderr);
         return;
     }
     FILE *fp = open_create_if_not_exist(bookmark_file);
@@ -75,12 +75,12 @@ void bm_save_bookmark(const char *docpath, int bm_pageno) {
     char temp_filename[] = "/tmp/mupdf_bookmark.XXXXXX";
     int temp_fd = mkstemp(temp_filename);
     if (temp_fd == -1) {
-        perror("mkstemp");
+        perror("can't create temporary file; mkstemp");
         goto clean2;
     }
     FILE *tmp = fdopen(temp_fd, "w+");
     if (tmp == NULL) {
-        perror("fdopen");
+        perror("can't get stream for temporary file; fdopen");
         goto clean3;
     }
 
@@ -99,11 +99,12 @@ void bm_save_bookmark(const char *docpath, int bm_pageno) {
     }
 
     clean4: if (fclose(tmp) != 0)
-                perror("fclose");
+                perror("can't close temporary file; fclose");
     clean3: if (remove(temp_filename) != 0)
-                perror("remove");
+                perror("can't remove temporary file; remove");
     clean2: if (fclose(fp) != 0)
-                perror("fclose");
+                fprintf(stderr, "%s: fclose: %s\n",
+                    bookmark_file, strerror(errno));
     clean1: free(bookmark_file);
 }
 
@@ -130,7 +131,7 @@ static int get_pageno(FILE *fp, const char *docpath) {
         bm_pageno = strtol(line + docpath_len + SEPARATOR_LEN, NULL, 10);
         if (errno != 0) {
             bm_pageno = BM_NO_BOOKMARK;
-            perror("strtol");
+            perror("can't read bookmark page number; strtol");
         }
         else if (bm_pageno > INT_MAX) {
             bm_pageno = BM_NO_BOOKMARK;
@@ -194,11 +195,11 @@ static char *get_bookmark_path() {
         struct passwd *passwd;
         errno = 0;
         if ((passwd = getpwuid(getuid())) == NULL) {
-            perror("getpwnam");
+            perror("can't get password record; getpwuid");
             return NULL;
         }
         if ((home = passwd->pw_dir) == NULL) {
-            fputs("pw_dir in passwd is NULL\n", stderr);
+            fputs("home directory not set in password file\n", stderr);
             return NULL;
         }
     }
@@ -227,7 +228,7 @@ static bool file_lock(FILE *fp, int operation) {
         return false;
     }
     if (flock(fd, operation) == -1) {
-        perror("flock");
+        perror("can't lock file; flock");
         return false;
     }
     return true;
@@ -245,7 +246,7 @@ static void file_unlock(FILE *fp) {
         return;
     }
     if (flock(fd, LOCK_UN) == -1)
-        perror("flock");
+        perror("can't unlock file; flock");
 }
 
 /** Resize buffer.
@@ -314,12 +315,12 @@ static void copy_file(FILE *source, FILE *dest) {
         fwrite(buf, sizeof(*buf), n, dest);
 
     if (ferror(source) != 0)
-        perror("fread");
+        perror("source file; fread");
     if (ferror(dest) != 0)
-        perror("fread");
+        perror("destination file; fread");
 
     if (fflush(dest) != 0)
-        perror("fflush");
+        perror("destination file; fflush");
 }
 
 /* Open a file for reading and writing. If the file doesn't exist, create it.
@@ -330,12 +331,13 @@ static FILE *open_create_if_not_exist(const char *filename) {
     errno = 0;
     FILE *fp = fopen(filename, "r+");
     if (fp == NULL) {
-        perror("fopen");
+        fprintf(stderr, "%s; fopen: %s\n", filename, strerror(errno));
         if (errno == ENOENT) {
             errno = 0;
             fp = fopen(filename, "w+");
             if (fp == NULL)
-                perror("fopen");
+                fprintf(stderr, "can't create file: %s; fopen: %s\n",
+                    filename, strerror(errno));
         }
     }
 

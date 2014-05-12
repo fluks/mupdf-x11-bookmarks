@@ -34,11 +34,11 @@ static void pdfapp_updatepage(pdfapp_t *app);
  * @return Pointer to absolute path of the document or NULL if fails.
  */
 static char *absolute_path(const char *filename) {
-    char *path = NULL;
     errno = 0;
     /* If fails, bookmarks are disabled altogether. */
-    if ((path = realpath(filename, NULL)) == NULL)
-        perror("realpath");
+    char *path = realpath(filename, NULL);
+    if (path == NULL)
+        perror("can't get absolute path of the document; realpath");
     return path;
 }
 
