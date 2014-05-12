@@ -28,7 +28,7 @@ static int get_pageno(FILE *fp, const char *docpath);
 static void change_pageno(FILE *bm, FILE *tmp, const char *docpath, int bm_pageno);
 static ssize_t jl_readline(FILE *fp, char **buffer, size_t *size);
 static void copy_file(FILE *source, FILE *dest);
-static FILE *open_create_if_not_exist(const char *filename);
+static FILE *open_create_if_not_exist(const char *file);
 
 int bm_read_bookmark(const char *docpath) {
     if (docpath == NULL)
@@ -63,17 +63,17 @@ void bm_save_bookmark(const char *docpath, int bm_pageno) {
     if (docpath == NULL || bm_pageno == BM_NO_BOOKMARK)
         return;
 
-    char *bookmark_file = get_bookmark_path();
-    if (bookmark_file == NULL) {
+    char *bm_file = get_bookmark_path();
+    if (bm_file == NULL) {
         fputs("can't get bookmark filename\n", stderr);
         return;
     }
-    FILE *fp = open_create_if_not_exist(bookmark_file);
+    FILE *fp = open_create_if_not_exist(bm_file);
     if (fp == NULL)
         goto clean1;
 
-    char temp_filename[] = "/tmp/mupdf_bookmark.XXXXXX";
-    int temp_fd = mkstemp(temp_filename);
+    char temp_file[] = "/tmp/mupdf_bookmark.XXXXXX";
+    int temp_fd = mkstemp(temp_file);
     if (temp_fd == -1) {
         perror("can't create temporary file; mkstemp");
         goto clean2;
@@ -100,12 +100,11 @@ void bm_save_bookmark(const char *docpath, int bm_pageno) {
 
     clean4: if (fclose(tmp) != 0)
                 perror("can't close temporary file; fclose");
-    clean3: if (remove(temp_filename) != 0)
+    clean3: if (remove(temp_file) != 0)
                 perror("can't remove temporary file; remove");
     clean2: if (fclose(fp) != 0)
-                fprintf(stderr, "%s: fclose: %s\n",
-                    bookmark_file, strerror(errno));
-    clean1: free(bookmark_file);
+                fprintf(stderr, "%s: fclose: %s\n", bm_file, strerror(errno));
+    clean1: free(bm_file);
 }
 
 /* Get page number from bookmark file.
@@ -327,17 +326,17 @@ static void copy_file(FILE *source, FILE *dest) {
  * @param filename
  * @return Pointer to a file or NULL if fails.
  */
-static FILE *open_create_if_not_exist(const char *filename) {
+static FILE *open_create_if_not_exist(const char *file) {
     errno = 0;
-    FILE *fp = fopen(filename, "r+");
+    FILE *fp = fopen(file, "r+");
     if (fp == NULL) {
-        fprintf(stderr, "%s; fopen: %s\n", filename, strerror(errno));
+        fprintf(stderr, "%s; fopen: %s\n", file, strerror(errno));
         if (errno == ENOENT) {
             errno = 0;
-            fp = fopen(filename, "w+");
+            fp = fopen(file, "w+");
             if (fp == NULL)
                 fprintf(stderr, "can't create file: %s; fopen: %s\n",
-                    filename, strerror(errno));
+                    file, strerror(errno));
         }
     }
 
