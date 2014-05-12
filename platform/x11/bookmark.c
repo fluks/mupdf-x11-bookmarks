@@ -28,6 +28,7 @@ static int get_pageno(FILE *fp, const char *docpath);
 static void change_pageno(FILE *bm, FILE *tmp, const char *docpath, int bm_pageno);
 static ssize_t jl_readline(FILE *fp, char **buffer, size_t *size);
 static int copy_file(FILE *source, FILE *dest);
+static FILE *open_create_if_not_exist(const char *filename);
 
 int bm_read_bookmark(char *docpath) {
     if (docpath == NULL)
@@ -67,12 +68,9 @@ void bm_save_bookmark(char *docpath, int bm_pageno) {
         fputs("can't get bookmark file\n", stderr);
         return;
     }
-    errno = 0;
-    FILE *fp = fopen(bookmark_file, "r+");
-    if (fp == NULL) {
-        perror("fopen");
+    FILE *fp = open_create_if_not_exist(bookmark_file);
+    if (fp == NULL)
         goto clean1;
-    }
 
     char temp_filename[] = "/tmp/mupdf_bookmark.XXXXXX";
     int temp_fd = mkstemp(temp_filename);
@@ -325,4 +323,20 @@ static int copy_file(FILE *source, FILE *dest) {
         perror("fflush");
 
     return 0;
+}
+
+static FILE *open_create_if_not_exist(const char *filename) {
+    errno = 0;
+    FILE *fp = fopen(filename, "r+");
+    if (fp == NULL) {
+        perror("fopen");
+        if (errno == ENOENT) {
+            errno = 0;
+            fp = fopen(filename, "w+");
+            if (fp == NULL)
+                perror("fopen");
+        }
+    }
+
+    return fp;
 }
