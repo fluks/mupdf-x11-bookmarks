@@ -123,9 +123,8 @@ static int get_pageno(FILE *fp, const char *docpath) {
         /* Remove newline. */
         line[read - 1] = '\0';
         
-        if (strncmp(line, docpath, docpath_len) != 0)
-            continue;
-        if (strncmp(line + docpath_len, SEPARATOR, SEPARATOR_LEN) != 0)
+        if (strncmp(line, docpath, docpath_len) != 0 ||
+            strncmp(line + docpath_len, SEPARATOR, SEPARATOR_LEN) != 0)
             continue;
         errno = 0;
         bm_pageno = strtol(line + docpath_len + SEPARATOR_LEN, NULL, 10);
@@ -167,11 +166,8 @@ static void change_pageno(FILE *bm, FILE *tmp, const char *docpath, int bm_pagen
         /* Remove newline. */
         line[read - 1] = '\0';
 
-        if (strncmp(line, docpath, docpath_len)) {
-            fprintf(tmp, "%s\n", line);
-            continue;
-        }
-        if (strncmp(line + docpath_len, SEPARATOR, SEPARATOR_LEN)) {
+        if (strncmp(line, docpath, docpath_len) != 0 ||
+            strncmp(line + docpath_len, SEPARATOR, SEPARATOR_LEN) != 0) {
             fprintf(tmp, "%s\n", line);
             continue;
         }
