@@ -30,7 +30,7 @@ static ssize_t jl_readline(FILE *fp, char **buffer, size_t *size);
 static int copy_file(FILE *source, FILE *dest);
 static FILE *open_create_if_not_exist(const char *filename);
 
-int bm_read_bookmark(char *docpath) {
+int bm_read_bookmark(const char *docpath) {
     if (docpath == NULL)
         return BM_NO_BOOKMARK;
 
@@ -59,7 +59,7 @@ int bm_read_bookmark(char *docpath) {
     return bm_pageno;
 }
 
-void bm_save_bookmark(char *docpath, int bm_pageno) {
+void bm_save_bookmark(const char *docpath, int bm_pageno) {
     if (docpath == NULL || bm_pageno == BM_NO_BOOKMARK)
         return;
 
