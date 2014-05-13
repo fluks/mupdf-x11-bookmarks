@@ -34,11 +34,11 @@ static void pdfapp_updatepage(pdfapp_t *app);
  * @return Pointer to absolute path of the document or NULL if fails.
  */
 static char *absolute_path(const char *filename) {
-    errno = 0;
-    char *path = realpath(filename, NULL);
-    if (path == NULL)
-        perror("can't get absolute path of the document; realpath");
-    return path;
+	errno = 0;
+	char *path = realpath(filename, NULL);
+	if (path == NULL)
+		perror("can't get absolute path of the document; realpath");
+	return path;
 }
 
 static void pdfapp_warn(pdfapp_t *app, const char *fmt, ...)
@@ -200,15 +200,15 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int bps)
 	fz_context *ctx = app->ctx;
 	char *password = "";
 
-    app->absolute_docpath = absolute_path(filename);
-    if (app->absolute_docpath != NULL && !reload) {
-        app->bookmark_pageno = bm_read_bookmark(app->absolute_docpath);
-        if (app->bookmark_pageno != BM_NO_BOOKMARK) {
-            app->pageno = app->bookmark_pageno;
-            /* Save bookmark only if it's changed later on. */
-            app->bookmark_pageno = BM_NO_BOOKMARK;
-        }
-    }
+	app->absolute_docpath = absolute_path(filename);
+	if (app->absolute_docpath != NULL && !reload) {
+		app->bookmark_pageno = bm_read_bookmark(app->absolute_docpath);
+		if (app->bookmark_pageno != BM_NO_BOOKMARK) {
+			app->pageno = app->bookmark_pageno;
+			/* Save bookmark only if it's changed later on. */
+			app->bookmark_pageno = BM_NO_BOOKMARK;
+		}
+	}
 
 	fz_try(ctx)
 	{
@@ -360,10 +360,10 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int bps)
 
 void pdfapp_close(pdfapp_t *app)
 {
-    bm_save_bookmark(app->absolute_docpath, app->bookmark_pageno);
+	bm_save_bookmark(app->absolute_docpath, app->bookmark_pageno);
 
-    free(app->absolute_docpath);
-        app->absolute_docpath = NULL;
+	free(app->absolute_docpath);
+		app->absolute_docpath = NULL;
 
 	fz_drop_display_list(app->ctx, app->page_list);
 	app->page_list = NULL;
@@ -1316,14 +1316,14 @@ void pdfapp_onkey(pdfapp_t *app, int c)
 			pdfapp_search_in_direction(app, &panto, 1);
 		loadpage = 0;
 		break;
-    
-    /* Bookmark page. */
-    case 'B':
-        if (app->absolute_docpath != NULL) {
-            app->bookmark_pageno = app->pageno;
-            windrawstring(app, 10, 20, "bookmark saved");
-        }
-        break;
+
+	/* Bookmark page. */
+	case 'B':
+		if (app->absolute_docpath != NULL) {
+			app->bookmark_pageno = app->pageno;
+			windrawstring(app, 10, 20, "bookmark saved");
+		}
+		break;
 	}
 
 	if (c < '0' || c > '9')

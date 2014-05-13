@@ -1,5 +1,5 @@
 #ifndef BOOKMARK_H
-    #define BOOKMARK_H
+	#define BOOKMARK_H
 #define BM_NO_BOOKMARK -1
 
 /* Read bookmark page number.
