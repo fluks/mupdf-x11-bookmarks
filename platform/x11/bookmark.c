@@ -267,15 +267,15 @@ static bool resize_buffer(char **buffer, size_t *size) {
 }
 
 /** Read a line.
+ * Reads a line ending to '\n' or to the end of file. If '\n' is found it's
+ * put to the buffer.
+ * Buffer is always nul terminated.
  * @param fp A pointer to a file stream, can't be NULL.
  * @param buffer A pointer to a buffer to store the line.
  * @param size A pointer to the size of the buffer. If buffer is not NULL, the
- *			 size can't be zero then. If buffer is NULL, a buffer of size
- *			 length is allocated. @n
- *			 After a call to jl_readline, size is set to the new size of the
- *			 buffer. 
- * @return Number of chars read or -1 if eof, a file error or memory allocation
- *		 error.
+ * size can't be zero then. If buffer is NULL, a buffer of size length is allocated.
+ * After a call to jl_readline, size is set to the new size of the buffer. 
+ * @return Number of chars read or -1 if eof, a file error or memory allocation error.
  * @note Buffer is dynamically allocated, caller should free its memory.
  */
 static ssize_t jl_readline(FILE *fp, char **buffer, size_t *size) {
@@ -293,6 +293,8 @@ static ssize_t jl_readline(FILE *fp, char **buffer, size_t *size) {
 		const char *nl;
 		if ((nl = memchr(ret, '\n', *size - end_of_chars)) != NULL)
 			return nl - *buffer + 1;
+		if (feof(fp))
+			return strlen(*buffer);
 		end_of_chars = *size - 1;
 		*size *= 2;
 		if (!resize_buffer(buffer, size))
