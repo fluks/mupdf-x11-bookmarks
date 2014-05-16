@@ -6,6 +6,7 @@ DerivedData
 generated
 cscope.*
 *.pdf
+!test_bookmark/*.pdf
 *.pnm
 tags
 TAGS
