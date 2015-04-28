@@ -19,19 +19,19 @@ static fz_rect hit_bbox[500];
 
 int search_page(fz_document *doc, int number, char *needle, fz_cookie *cookie)
 {
-	fz_page *page = fz_load_page(doc, number);
+	fz_page *page = fz_load_page(ctx, doc, number);
 
 	fz_text_sheet *sheet = fz_new_text_sheet(ctx);
 	fz_text_page *text = fz_new_text_page(ctx);
 	fz_device *dev = fz_new_text_device(ctx, sheet, text);
-	fz_run_page(doc, page, dev, &fz_identity, cookie);
-	fz_free_device(dev);
+	fz_run_page(ctx, page, dev, &fz_identity, cookie);
+	fz_drop_device(ctx, dev);
 
 	hit_count = fz_search_text_page(ctx, text, needle, hit_bbox, nelem(hit_bbox));
 
-	fz_free_text_page(ctx, text);
-	fz_free_text_sheet(ctx, sheet);
-	fz_free_page(doc, page);
+	fz_drop_text_page(ctx, text);
+	fz_drop_text_sheet(ctx, sheet);
+	fz_drop_page(ctx, page);
 
 	return hit_count;
 }
@@ -53,7 +53,7 @@ static void releasePixmap(void *info, const void *data, size_t size)
 	}
 }
 
-CGDataProviderRef wrapPixmap(fz_pixmap *pix)
+CGDataProviderRef CreateWrappedPixmap(fz_pixmap *pix)
 {
 	unsigned char *samples = fz_pixmap_samples(ctx, pix);
 	int w = fz_pixmap_width(ctx, pix);
@@ -61,7 +61,7 @@ CGDataProviderRef wrapPixmap(fz_pixmap *pix)
 	return CGDataProviderCreateWithData(pix, samples, w * 4 * h, releasePixmap);
 }
 
-CGImageRef newCGImageWithPixmap(fz_pixmap *pix, CGDataProviderRef cgdata)
+CGImageRef CreateCGImageWithPixmap(fz_pixmap *pix, CGDataProviderRef cgdata)
 {
 	int w = fz_pixmap_width(ctx, pix);
 	int h = fz_pixmap_height(ctx, pix);

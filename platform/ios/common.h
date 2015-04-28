@@ -8,7 +8,6 @@
 #undef MAX
 
 #include "mupdf/fitz.h"
-#include "dispatch/dispatch.h"
 
 extern fz_context *ctx;
 extern dispatch_queue_t queue;
@@ -20,8 +19,8 @@ int search_page(fz_document *doc, int number, char *needle, fz_cookie *cookie);
 
 fz_rect search_result_bbox(fz_document *doc, int i);
 
-CGDataProviderRef wrapPixmap(fz_pixmap *pix);
+CGDataProviderRef CreateWrappedPixmap(fz_pixmap *pix);
 
-CGImageRef newCGImageWithPixmap(fz_pixmap *pix, CGDataProviderRef cgdata);
+CGImageRef CreateCGImageWithPixmap(fz_pixmap *pix, CGDataProviderRef cgdata);
 
 #endif

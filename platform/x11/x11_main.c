@@ -5,10 +5,12 @@
 #include <X11/Xatom.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
+#include <X11/XF86keysym.h>
 
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <signal.h>
 
@@ -68,6 +70,7 @@ static Atom XA_TARGETS;
 static Atom XA_TIMESTAMP;
 static Atom XA_UTF8_STRING;
 static Atom WM_DELETE_WINDOW;
+static Atom NET_WM_NAME;
 static Atom NET_WM_STATE;
 static Atom NET_WM_STATE_FULLSCREEN;
 static Atom WM_RELOAD_PAGE;
@@ -117,13 +120,7 @@ static void showmessage(pdfapp_t *app, int timeout, char *msg)
 
 	fz_strlcpy(message, msg, sizeof message);
 
-	if (!tmo_at.tv_sec && !tmo_at.tv_usec)
-	{
-		tmo.tv_sec = timeout;
-		gettimeofday(&now, NULL);
-		timeradd(&now, &tmo, &tmo_at);
-	}
-	else if (tmo.tv_sec < timeout)
+	if ((!tmo_at.tv_sec && !tmo_at.tv_usec) || tmo.tv_sec < timeout)
 	{
 		tmo.tv_sec = timeout;
 		tmo.tv_usec = 0;
@@ -213,6 +210,7 @@ static void winopen(void)
 	XA_TIMESTAMP = XInternAtom(xdpy, "TIMESTAMP", False);
 	XA_UTF8_STRING = XInternAtom(xdpy, "UTF8_STRING", False);
 	WM_DELETE_WINDOW = XInternAtom(xdpy, "WM_DELETE_WINDOW", False);
+	NET_WM_NAME = XInternAtom(xdpy, "_NET_WM_NAME", False);
 	NET_WM_STATE = XInternAtom(xdpy, "_NET_WM_STATE", False);
 	NET_WM_STATE_FULLSCREEN = XInternAtom(xdpy, "_NET_WM_STATE_FULLSCREEN", False);
 	WM_RELOAD_PAGE = XInternAtom(xdpy, "_WM_RELOAD_PAGE", False);
@@ -349,7 +347,7 @@ void cleanup(pdfapp_t *app)
 
 	XCloseDisplay(xdpy);
 
-	fz_free_context(ctx);
+	fz_drop_context(ctx);
 }
 
 static int winresolution()
@@ -379,6 +377,8 @@ void wintitle(pdfapp_t *app, char *s)
 #else
 	XmbSetWMProperties(xdpy, xwin, s, s, NULL, 0, NULL, NULL, NULL);
 #endif
+	XChangeProperty(xdpy, xwin, NET_WM_NAME, XA_UTF8_STRING, 8,
+			PropModeReplace, (unsigned char *)s, strlen(s));
 }
 
 void winhelp(pdfapp_t *app)
@@ -713,15 +713,10 @@ void winreloadpage(pdfapp_t *app)
 	XCloseDisplay(dpy);
 }
 
-void winreloadfile(pdfapp_t *app)
-{
-	pdfapp_close(app);
-	pdfapp_open(app, filename, 1);
-}
-
 void winopenuri(pdfapp_t *app, char *buf)
 {
 	char *browser = getenv("BROWSER");
+	pid_t pid;
 	if (!browser)
 	{
 #ifdef __APPLE__
@@ -730,15 +725,25 @@ void winopenuri(pdfapp_t *app, char *buf)
 		browser = "xdg-open";
 #endif
 	}
-	if (fork() == 0)
+	/* Fork once to start a child process that we wait on. This
+	 * child process forks again and immediately exits. The
+	 * grandchild process continues in the background. The purpose
+	 * of this strange two-step is to avoid zombie processes. See
+	 * bug 695701 for an explanation. */
+	pid = fork();
+	if (pid == 0)
 	{
-		execlp(browser, browser, buf, (char*)0);
-		fprintf(stderr, "cannot exec '%s'\n", browser);
+		if (fork() == 0)
+		{
+			execlp(browser, browser, buf, (char*)0);
+			fprintf(stderr, "cannot exec '%s'\n", browser);
+		}
 		exit(0);
 	}
+	waitpid(pid, NULL, 0);
 }
 
-static void onkey(int c)
+static void onkey(int c, int modifiers)
 {
 	advance_scheduled = 0;
 
@@ -761,7 +766,7 @@ static void onkey(int c)
 		return;
 	}
 
-	pdfapp_onkey(&gapp, c);
+	pdfapp_onkey(&gapp, c, modifiers);
 
 	if (gapp.issearching)
 	{
@@ -793,9 +798,13 @@ static void signal_handler(int signal)
 static void usage(void)
 {
 	fprintf(stderr, "usage: mupdf [options] file.pdf [page]\n");
-	fprintf(stderr, "\t-b -\tset anti-aliasing quality in bits (0=off, 8=best)\n");
 	fprintf(stderr, "\t-p -\tpassword\n");
 	fprintf(stderr, "\t-r -\tresolution\n");
+	fprintf(stderr, "\t-A -\tset anti-aliasing quality in bits (0=off, 8=best)\n");
+	fprintf(stderr, "\t-C -\tRRGGBB (tint color in hexadecimal syntax)\n");
+	fprintf(stderr, "\t-W -\tpage width for EPUB layout\n");
+	fprintf(stderr, "\t-H -\tpage height for EPUB layout\n");
+	fprintf(stderr, "\t-S -\tfont size for EPUB layout\n");
 	exit(1);
 }
 
@@ -824,13 +833,25 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	while ((c = fz_getopt(argc, argv, "p:r:b:")) != -1)
+	pdfapp_init(ctx, &gapp);
+
+	while ((c = fz_getopt(argc, argv, "p:r:A:C:W:H:S:")) != -1)
 	{
 		switch (c)
 		{
+		case 'C':
+			c = strtol(fz_optarg, NULL, 16);
+			gapp.tint = 1;
+			gapp.tint_r = (c >> 16) & 255;
+			gapp.tint_g = (c >> 8) & 255;
+			gapp.tint_b = (c) & 255;
+			break;
 		case 'p': password = fz_optarg; break;
 		case 'r': resolution = atoi(fz_optarg); break;
-		case 'b': fz_set_aa_level(ctx, atoi(fz_optarg)); break;
+		case 'A': fz_set_aa_level(ctx, atoi(fz_optarg)); break;
+		case 'W': gapp.layout_w = fz_atof(fz_optarg); break;
+		case 'H': gapp.layout_h = fz_atof(fz_optarg); break;
+		case 'S': gapp.layout_em = fz_atof(fz_optarg); break;
 		default: usage();
 		}
 	}
@@ -842,8 +863,6 @@ int main(int argc, char **argv)
 
 	if (argc - fz_optind == 1)
 		pageno = atoi(argv[fz_optind++]);
-
-	pdfapp_init(ctx, &gapp);
 
 	winopen();
 
@@ -860,15 +879,15 @@ int main(int argc, char **argv)
 	gapp.resolution = resolution;
 	gapp.pageno = pageno;
 
+	tmo_at.tv_sec = 0;
+	tmo_at.tv_usec = 0;
+	timeout = NULL;
+
 	pdfapp_open(&gapp, filename, 0);
 
 	FD_ZERO(&fds);
 
 	signal(SIGHUP, signal_handler);
-
-	tmo_at.tv_sec = 0;
-	tmo_at.tv_usec = 0;
-	timeout = NULL;
 
 	while (!closing)
 	{
@@ -919,16 +938,18 @@ int main(int argc, char **argv)
 						break;
 
 					case XK_Page_Up:
+					case XF86XK_Back:
 						len = 1; buf[0] = ',';
 						break;
 					case XK_Page_Down:
+					case XF86XK_Forward:
 						len = 1; buf[0] = '.';
 						break;
 					}
 				if (xevt.xkey.state & ControlMask && keysym == XK_c)
 					docopy(&gapp, XA_CLIPBOARD);
 				else if (len)
-					onkey(buf[0]);
+					onkey(buf[0], xevt.xkey.state);
 
 				onmouse(oldx, oldy, 0, 0, 0);
 
@@ -1024,7 +1045,7 @@ int main(int argc, char **argv)
 			if (tmo_advance_delay.tv_sec <= 0)
 			{
 				/* Too late already */
-				onkey(' ');
+				onkey(' ', 0);
 				onmouse(oldx, oldy, 0, 0, 0);
 				advance_scheduled = 0;
 			}
@@ -1048,7 +1069,7 @@ int main(int argc, char **argv)
 		{
 			if (reloading)
 			{
-				winreloadfile(&gapp);
+				pdfapp_reloadfile(&gapp);
 				reloading = 0;
 			}
 		}
@@ -1056,7 +1077,7 @@ int main(int argc, char **argv)
 		{
 			if (timeout == &tmo_advance_delay)
 			{
-				onkey(' ');
+				onkey(' ', 0);
 				onmouse(oldx, oldy, 0, 0, 0);
 				advance_scheduled = 0;
 			}

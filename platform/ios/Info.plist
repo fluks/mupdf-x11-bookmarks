@@ -29,40 +29,44 @@
 			</array>
 		</dict>
 		<dict>
+			<key>CFBundleTypeIconFiles</key>
+			<array/>
 			<key>CFBundleTypeName</key>
 			<string>CBZ</string>
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>public.zip-archive</string>
+				<string>public.cbz-archive</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeIconFiles</key>
+			<array/>
+			<key>CFBundleTypeName</key>
+			<string>OXPS</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.microsoft.oxps</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeIconFiles</key>
+			<array/>
+			<key>CFBundleTypeName</key>
+			<string>EPUB</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.idpf.epub-container</string>
 			</array>
 		</dict>
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>${EXECUTABLE_NAME}</string>
-	<key>CFBundleIconFiles</key>
-	<array>
-		<string>Icon.png</string>
-		<string>Icon@2x.png</string>
-		<string>Icon-72.png</string>
-		<string>Icon-72@2x.png</string>
-	</array>
-	<key>CFBundleIcons</key>
-	<dict>
-		<key>CFBundlePrimaryIcon</key>
-		<dict>
-			<key>CFBundleIconFiles</key>
-			<array>
-				<string>Icon.png</string>
-				<string>Icon@2x.png</string>
-				<string>Icon-72.png</string>
-				<string>Icon-72@2x.png</string>
-			</array>
-			<key>UIPrerenderedIcon</key>
-			<true/>
-		</dict>
-	</dict>
 	<key>CFBundleIdentifier</key>
 	<string>com.artifex.mupdf</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -72,15 +76,17 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.4</string>
+	<string>1.6</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>1.4</string>
+	<string>1.6</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>Launch Screen</string>
 	<key>UIPrerenderedIcon</key>
 	<true/>
 	<key>UIRequiredDeviceCapabilities</key>
@@ -119,8 +125,9 @@
 				<key>public.filename-extension</key>
 				<array>
 					<string>xps</string>
-					<string>oxps</string>
 				</array>
+				<key>public.mime-type</key>
+				<string>application/vnd.ms-xpsdocument</string>
 			</dict>
 		</dict>
 		<dict>
@@ -129,14 +136,15 @@
 				<string>public.data</string>
 			</array>
 			<key>UTTypeIdentifier</key>
-			<string>public.zip-archive</string>
+			<string>public.cbz-archive</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
 				<array>
-					<string>zip</string>
 					<string>cbz</string>
 				</array>
+				<key>public.mime-type</key>
+				<string>application/x-cbz</string>
 			</dict>
 		</dict>
 		<dict>
@@ -152,6 +160,42 @@
 				<array>
 					<string>pdf</string>
 				</array>
+				<key>public.mime-type</key>
+				<string>application/pdf</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeIdentifier</key>
+			<string>com.microsoft.oxps</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>oxps</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/oxps</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeIdentifier</key>
+			<string>org.idpf.epub-container</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>epub</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/epub+zip</string>
 			</dict>
 		</dict>
 	</array>

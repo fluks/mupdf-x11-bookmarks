@@ -64,6 +64,81 @@ fz_strlcat(char *dst, const char *src, int siz)
 	return dlen + (s - src);	/* count does not include NUL */
 }
 
+void
+fz_dirname(char *dir, const char *path, int n)
+{
+	int i;
+
+	if (!path || !path[0])
+	{
+		fz_strlcpy(dir, ".", n);
+		return;
+	}
+
+	fz_strlcpy(dir, path, n);
+
+	i = strlen(dir);
+	for(; dir[i] == '/'; --i) if (!i) { fz_strlcpy(dir, "/", n); return; }
+	for(; dir[i] != '/'; --i) if (!i) { fz_strlcpy(dir, ".", n); return; }
+	for(; dir[i] == '/'; --i) if (!i) { fz_strlcpy(dir, "/", n); return; }
+	dir[i+1] = 0;
+}
+
+#define SEP(x) ((x)=='/' || (x) == 0)
+
+char *
+fz_cleanname(char *name)
+{
+	char *p, *q, *dotdot;
+	int rooted;
+
+	rooted = name[0] == '/';
+
+	/*
+	 * invariants:
+	 *		p points at beginning of path element we're considering.
+	 *		q points just past the last path element we wrote (no slash).
+	 *		dotdot points just past the point where .. cannot backtrack
+	 *				any further (no slash).
+	 */
+	p = q = dotdot = name + rooted;
+	while (*p)
+	{
+		if(p[0] == '/') /* null element */
+			p++;
+		else if (p[0] == '.' && SEP(p[1]))
+			p += 1; /* don't count the separator in case it is nul */
+		else if (p[0] == '.' && p[1] == '.' && SEP(p[2]))
+		{
+			p += 2;
+			if (q > dotdot) /* can backtrack */
+			{
+				while(--q > dotdot && *q != '/')
+					;
+			}
+			else if (!rooted) /* /.. is / but ./../ is .. */
+			{
+				if (q != name)
+					*q++ = '/';
+				*q++ = '.';
+				*q++ = '.';
+				dotdot = q;
+			}
+		}
+		else /* real path element */
+		{
+			if (q != name+rooted)
+				*q++ = '/';
+			while ((*q = *p) != '/' && *q != 0)
+				p++, q++;
+		}
+	}
+
+	if (q == name) /* empty string is really "." */
+		*q++ = '.';
+	*q = '\0';
+	return name;
+}
 enum
 {
 	UTFmax = 4, /* maximum bytes per rune */
@@ -247,7 +322,7 @@ float fz_atof(const char *s)
 	 * don't read a number that's OK as a double and then become invalid
 	 * as we convert to a float. */
 	errno = 0;
-	d = strtod(s, NULL);
+	d = fz_strtod(s, NULL);
 	if (errno == ERANGE || isnan(d)) {
 		/* Return 1.0, as it's a small known value that won't cause a divide by 0. */
 		return 1.0;

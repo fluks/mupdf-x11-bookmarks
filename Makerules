@@ -63,7 +63,11 @@ SYS_OPENSSL_CFLAGS = -DHAVE_OPENSSL $(shell pkg-config --cflags libcrypto)
 SYS_OPENSSL_LIBS = $(shell pkg-config --libs libcrypto)
 endif
 
-# TODO: use pkg-config for system CURL
+ifeq "$(shell pkg-config --exists libcurl && echo yes)" "yes"
+HAVE_CURL = yes
+SYS_CURL_CFLAGS = $(shell pkg-config --cflags libcurl)
+SYS_CURL_LIBS = $(shell pkg-config --libs libcurl)
+endif
 SYS_CURL_DEPS = -lpthread -lrt
 
 SYS_X11_CFLAGS = $(shell pkg-config --cflags x11 xext)
@@ -140,6 +144,30 @@ AR = xcrun ar
 LD = xcrun ld
 RANLIB_CMD = xcrun ranlib $@
 CROSSCOMPILE=yes
+endif
+
+ifeq "$(OS)" "tizen-arm"
+TIZEN_TOOLS=$(TIZEN_SDK)/tools/arm-linux-gnueabi-gcc-4.6/bin/arm-linux-gnueabi-
+TIZEN_FLAGS=--sysroot=$(TIZEN_SDK)/platforms/mobile-2.3/rootstraps/mobile-2.3-device.core
+CC = $(TIZEN_TOOLS)gcc $(TIZEN_FLAGS)
+AR = $(TIZEN_TOOLS)ar
+LD = $(TIZEN_TOOLS)ld $(TIZEN_FLAGS)
+CROSSCOMPILE=yes
+endif
+
+ifeq "$(OS)" "tizen-x86"
+TIZEN_TOOLS=$(TIZEN_SDK)/tools/i386-linux-gnueabi-gcc-4.6/bin/i386-linux-gnueabi-
+TIZEN_FLAGS=--sysroot=$(TIZEN_SDK)/platforms/mobile-2.3/rootstraps/mobile-2.3-emulator.core
+CC = $(TIZEN_TOOLS)gcc $(TIZEN_FLAGS)
+AR = $(TIZEN_TOOLS)ar $(TIZEN_FLAGS)
+LD = $(TIZEN_TOOLS)ld $(TIZEN_FLAGS)
+CROSSCOMPILE=yes
+endif
+
+ifeq "$(OS)" "MINGW"
+WIN32_LIBS=-lcomdlg32 -lgdi32
+HAVE_WIN32=yes
+LDFLAGS += -Wl,-subsystem,windows
 endif
 
 # TODO: If crosscompiling, why not just call "make libs" instead of this exception?

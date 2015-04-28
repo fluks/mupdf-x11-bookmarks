@@ -106,6 +106,8 @@ public class ChoosePDFActivity extends ListActivity {
 								return true;
 							if (fname.endsWith(".cbz"))
 								return true;
+							if (fname.endsWith(".epub"))
+								return true;
 							if (fname.endsWith(".png"))
 								return true;
 							if (fname.endsWith(".jpe"))
@@ -219,6 +221,7 @@ public class ChoosePDFActivity extends ListActivity {
 	@Override
 	protected void onPause() {
 		super.onPause();
-		mPositions.put(mDirectory.getAbsolutePath(), getListView().getFirstVisiblePosition());
+		if (mDirectory != null)
+			mPositions.put(mDirectory.getAbsolutePath(), getListView().getFirstVisiblePosition());
 	}
 }

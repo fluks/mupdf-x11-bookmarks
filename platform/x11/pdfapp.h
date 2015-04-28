@@ -11,8 +11,9 @@
  * uses a number of callbacks to the GUI app.
  */
 
-#define MINRES 54
-#define MAXRES 300
+/* 25% .. 400% */
+#define MINRES 18
+#define MAXRES 288
 
 typedef struct pdfapp_s pdfapp_t;
 
@@ -32,7 +33,6 @@ extern int winchoiceinput(pdfapp_t*, int nopts, char *opts[], int *nvals, char *
 extern void winopenuri(pdfapp_t*, char *s);
 extern void wincursor(pdfapp_t*, int curs);
 extern void windocopy(pdfapp_t*);
-extern void winreloadfile(pdfapp_t*);
 extern void windrawstring(pdfapp_t*, int x, int y, char *s);
 extern void winclose(pdfapp_t*);
 extern void winhelp(pdfapp_t*);
@@ -55,6 +55,10 @@ struct pdfapp_s
 	fz_outline *outline;
 	int outline_deferred;
 
+	float layout_w;
+	float layout_h;
+	float layout_em;
+
 	int pagecount;
 
 	/* current view params */
@@ -64,6 +68,7 @@ struct pdfapp_s
 	int grayscale;
 	fz_colorspace *colorspace;
 	int invert;
+	int tint, tint_r, tint_g, tint_b;
 
 	/* presentation mode */
 	int presentation_mode;
@@ -144,16 +149,20 @@ void pdfapp_open(pdfapp_t *app, char *filename, int reload);
 void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int bps);
 void pdfapp_close(pdfapp_t *app);
 int pdfapp_preclose(pdfapp_t *app);
+void pdfapp_reloadfile(pdfapp_t *app);
 
 char *pdfapp_version(pdfapp_t *app);
 char *pdfapp_usage(pdfapp_t *app);
 
-void pdfapp_onkey(pdfapp_t *app, int c);
+void pdfapp_onkey(pdfapp_t *app, int c, int modifiers);
 void pdfapp_onmouse(pdfapp_t *app, int x, int y, int btn, int modifiers, int state);
 void pdfapp_oncopy(pdfapp_t *app, unsigned short *ucsbuf, int ucslen);
 void pdfapp_onresize(pdfapp_t *app, int w, int h);
 void pdfapp_gotopage(pdfapp_t *app, int number);
 void pdfapp_reloadpage(pdfapp_t *app);
+void pdfapp_autozoom_horizontal(pdfapp_t *app);
+void pdfapp_autozoom_vertical(pdfapp_t *app);
+void pdfapp_autozoom(pdfapp_t *app);
 
 void pdfapp_invert(pdfapp_t *app, const fz_rect *rect);
 void pdfapp_inverthit(pdfapp_t *app);

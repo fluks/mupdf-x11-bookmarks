@@ -43,7 +43,7 @@ static OPJ_SIZE_T fz_opj_stream_read(void * p_buffer, OPJ_SIZE_T p_nb_bytes, voi
 	if (len < 0)
 		len = 0;
 	if (len == 0)
-		return (OPJ_SIZE_T)-1;  /* End of file! */
+		return (OPJ_SIZE_T)-1; /* End of file! */
 	if ((OPJ_SIZE_T)len > p_nb_bytes)
 		len = p_nb_bytes;
 	memcpy(p_buffer, sb->data + sb->pos, len);
@@ -75,7 +75,6 @@ fz_pixmap *
 fz_load_jpx(fz_context *ctx, unsigned char *data, int size, fz_colorspace *defcs, int indexed)
 {
 	fz_pixmap *img;
-	fz_colorspace *origcs;
 	opj_dparameters_t params;
 	opj_codec_t *codec;
 	opj_image_t *jpx;
@@ -106,6 +105,7 @@ fz_load_jpx(fz_context *ctx, unsigned char *data, int size, fz_colorspace *defcs
 	opj_set_error_handler(codec, fz_opj_error_callback, ctx);
 	if (!opj_setup_decoder(codec, &params))
 	{
+		opj_destroy_codec(codec);
 		fz_throw(ctx, FZ_ERROR_GENERIC, "j2k decode failed");
 	}
 
@@ -179,7 +179,6 @@ fz_load_jpx(fz_context *ctx, unsigned char *data, int size, fz_colorspace *defcs
 	else if (n > 4) { n = 4; a = 1; }
 	else { a = 0; }
 
-	origcs = defcs;
 	if (defcs)
 	{
 		if (defcs->n == n)
@@ -244,14 +243,6 @@ fz_load_jpx(fz_context *ctx, unsigned char *data, int size, fz_colorspace *defcs
 			img = tmp;
 		}
 		fz_premultiply_pixmap(ctx, img);
-	}
-
-	if (origcs != defcs)
-	{
-		fz_pixmap *tmp = fz_new_pixmap(ctx, origcs, w, h);
-		fz_convert_pixmap(ctx, tmp, img);
-		fz_drop_pixmap(ctx, img);
-		img = tmp;
 	}
 
 	return img;

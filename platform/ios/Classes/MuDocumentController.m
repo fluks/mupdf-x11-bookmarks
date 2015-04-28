@@ -1,6 +1,5 @@
 #include "common.h"
 
-#import <TapImage.h>
 #import "MuPageViewNormal.h"
 #import "MuPageViewReflow.h"
 #import "MuDocumentController.h"
@@ -89,7 +88,8 @@ static void saveDoc(char *current_path, fz_document *doc)
 			FILE *fin = fopen(current_path, "rb");
 			FILE *fout = fopen(tmp, "wb");
 			char buf[256];
-			int n, err = 1;
+			size_t n;
+			int err = 1;
 
 			if (fin && fout)
 			{
@@ -105,7 +105,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 			if (!err)
 			{
-				fz_write_document(doc, tmp, &opts);
+				fz_write_document(ctx, doc, tmp, &opts);
 				written = 1;
 			}
 		}
@@ -124,6 +124,38 @@ static void saveDoc(char *current_path, fz_document *doc)
 }
 
 @implementation MuDocumentController
+{
+	fz_document *doc;
+	MuDocRef *docRef;
+	NSString *key;
+	char *filePath;
+	BOOL reflowMode;
+	MuOutlineController *outline;
+	UIScrollView *canvas;
+	UILabel *indicator;
+	UISlider *slider;
+	UISearchBar *searchBar;
+	UIBarButtonItem *nextButton, *prevButton, *cancelButton, *searchButton, *outlineButton, *linkButton;
+	UIBarButtonItem *moreButton;
+	UIBarButtonItem *shareButton, *printButton, *annotButton;
+	UIBarButtonItem *highlightButton, *underlineButton, *strikeoutButton;
+	UIBarButtonItem *inkButton;
+	UIBarButtonItem *tickButton;
+	UIBarButtonItem *deleteButton;
+	UIBarButtonItem *reflowButton;
+	UIBarButtonItem *backButton;
+	UIBarButtonItem *sliderWrapper;
+	int barmode;
+	int searchPage;
+	int cancelSearch;
+	int showLinks;
+	int width; // current screen size
+	int height;
+	int current; // currently visible page
+	int scroll_animating; // stop view updates during scrolling animations
+	float scale; // scale applied to views (only used in reflow mode)
+	BOOL _isRotating;
+}
 
 - (id) initWithFilename: (NSString*)filename path:(char *)cstr document: (MuDocRef *)aDoc
 {
@@ -142,7 +174,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 	dispatch_sync(queue, ^{});
 
-	fz_outline *root = fz_load_outline(doc);
+	fz_outline *root = fz_load_outline(ctx, doc);
 	if (root) {
 		NSMutableArray *titles = [[NSMutableArray alloc] init];
 		NSMutableArray *pages = [[NSMutableArray alloc] init];
@@ -151,13 +183,13 @@ static void saveDoc(char *current_path, fz_document *doc)
 			outline = [[MuOutlineController alloc] initWithTarget: self titles: titles pages: pages];
 		[titles release];
 		[pages release];
-		fz_free_outline(ctx, root);
+		fz_drop_outline(ctx, root);
 	}
 
 	return self;
 }
 
-- (UIBarButtonItem *) resourceBasedButton:(NSString *)resource withAction:(SEL)selector
+- (UIBarButtonItem *) newResourceBasedButton:(NSString *)resource withAction:(SEL)selector
 {
 	if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad)
 	{
@@ -165,10 +197,15 @@ static void saveDoc(char *current_path, fz_document *doc)
 	}
 	else
 	{
-		UIView *iv = [[TapImage alloc] initWithResource:resource target:self action:selector];
-		UIBarButtonItem *ib = [[UIBarButtonItem alloc] initWithCustomView:iv];
-		[iv release];
-		return ib;
+		UIView *buttonView;
+		BOOL iOS7Style = ([[UIDevice currentDevice].systemVersion floatValue] >= 7.0f);
+		UIButton *button = [UIButton buttonWithType:iOS7Style ? UIButtonTypeSystem : UIButtonTypeCustom];
+		[button setImage:[UIImage imageNamed:resource] forState:UIControlStateNormal];
+		[button addTarget:self action:selector forControlEvents:UIControlEventTouchUpInside];
+		[button sizeToFit];
+		buttonView = button;
+
+		return [[UIBarButtonItem alloc] initWithCustomView:buttonView];
 	}
 }
 
@@ -189,13 +226,14 @@ static void saveDoc(char *current_path, fz_document *doc)
 {
 	[[NSUserDefaults standardUserDefaults] setObject: key forKey: @"OpenDocumentKey"];
 
-	current = [[NSUserDefaults standardUserDefaults] integerForKey: key];
-	if (current < 0 || current >= fz_count_pages(doc))
+	current = (int)[[NSUserDefaults standardUserDefaults] integerForKey: key];
+	if (current < 0 || current >= fz_count_pages(ctx, doc))
 		current = 0;
 
 	UIView *view = [[UIView alloc] initWithFrame: CGRectZero];
 	[view setAutoresizingMask: UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight];
 	[view setAutoresizesSubviews: YES];
+	view.backgroundColor = [UIColor grayColor];
 
 	canvas = [[UIScrollView alloc] initWithFrame: CGRectMake(0,0,GAP,0)];
 	[canvas setAutoresizingMask: UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight];
@@ -233,7 +271,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 	slider = [[UISlider alloc] initWithFrame: CGRectZero];
 	[slider setMinimumValue: 0];
-	[slider setMaximumValue: fz_count_pages(doc) - 1];
+	[slider setMaximumValue: fz_count_pages(ctx, doc) - 1];
 	[slider addTarget: self action: @selector(onSlide:) forControlEvents: UIControlEventValueChanged];
 
 	if ([[[UIDevice currentDevice] systemVersion] floatValue] < 7.0)
@@ -246,26 +284,26 @@ static void saveDoc(char *current_path, fz_document *doc)
 	// Set up the buttons on the navigation and search bar
 
 	if (outline) {
-		outlineButton = [self resourceBasedButton:@"ic_list" withAction:@selector(onShowOutline:)];
+		outlineButton = [self newResourceBasedButton:@"ic_list" withAction:@selector(onShowOutline:)];
 	}
-	linkButton = [self resourceBasedButton:@"ic_link" withAction:@selector(onToggleLinks:)];
-	cancelButton = [self resourceBasedButton:@"ic_cancel" withAction:@selector(onCancel:)];
-	searchButton = [self resourceBasedButton:@"ic_magnifying_glass" withAction:@selector(onShowSearch:)];
-	prevButton = [self resourceBasedButton:@"ic_arrow_left" withAction:@selector(onSearchPrev:)];
-	nextButton = [self resourceBasedButton:@"ic_arrow_right" withAction:@selector(onSearchNext:)];
-	reflowButton = [self resourceBasedButton:@"ic_reflow" withAction:@selector(onToggleReflow:)];
-	moreButton = [self resourceBasedButton:@"ic_more" withAction:@selector(onMore:)];
-	annotButton = [self resourceBasedButton:@"ic_annotation" withAction:@selector(onAnnot:)];
-	shareButton = [self resourceBasedButton:@"ic_share" withAction:@selector(onShare:)];
-	printButton = [self resourceBasedButton:@"ic_print" withAction:@selector(onPrint:)];
-	highlightButton = [self resourceBasedButton:@"ic_highlight" withAction:@selector(onHighlight:)];
-	underlineButton = [self resourceBasedButton:@"ic_underline" withAction:@selector(onUnderline:)];
-	strikeoutButton = [self resourceBasedButton:@"ic_strike" withAction:@selector(onStrikeout:)];
-	inkButton = [self resourceBasedButton:@"ic_pen" withAction:@selector(onInk:)];
-	tickButton = [self resourceBasedButton:@"ic_check" withAction:@selector(onTick:)];
-	deleteButton = [self resourceBasedButton:@"ic_trash" withAction:@selector(onDelete:)];
+	linkButton = [self newResourceBasedButton:@"ic_link" withAction:@selector(onToggleLinks:)];
+	cancelButton = [self newResourceBasedButton:@"ic_cancel" withAction:@selector(onCancel:)];
+	searchButton = [self newResourceBasedButton:@"ic_magnifying_glass" withAction:@selector(onShowSearch:)];
+	prevButton = [self newResourceBasedButton:@"ic_arrow_left" withAction:@selector(onSearchPrev:)];
+	nextButton = [self newResourceBasedButton:@"ic_arrow_right" withAction:@selector(onSearchNext:)];
+	reflowButton = [self newResourceBasedButton:@"ic_reflow" withAction:@selector(onToggleReflow:)];
+	moreButton = [self newResourceBasedButton:@"ic_more" withAction:@selector(onMore:)];
+	annotButton = [self newResourceBasedButton:@"ic_annotation" withAction:@selector(onAnnot:)];
+	shareButton = [self newResourceBasedButton:@"ic_share" withAction:@selector(onShare:)];
+	printButton = [self newResourceBasedButton:@"ic_print" withAction:@selector(onPrint:)];
+	highlightButton = [self newResourceBasedButton:@"ic_highlight" withAction:@selector(onHighlight:)];
+	underlineButton = [self newResourceBasedButton:@"ic_underline" withAction:@selector(onUnderline:)];
+	strikeoutButton = [self newResourceBasedButton:@"ic_strike" withAction:@selector(onStrikeout:)];
+	inkButton = [self newResourceBasedButton:@"ic_pen" withAction:@selector(onInk:)];
+	tickButton = [self newResourceBasedButton:@"ic_check" withAction:@selector(onTick:)];
+	deleteButton = [self newResourceBasedButton:@"ic_trash" withAction:@selector(onDelete:)];
 	searchBar = [[UISearchBar alloc] initWithFrame: CGRectMake(0,0,50,32)];
-	backButton = [self resourceBasedButton:@"ic_arrow_left" withAction:@selector(onBack:)];
+	backButton = [self newResourceBasedButton:@"ic_arrow_left" withAction:@selector(onBack:)];
 	[searchBar setPlaceholder: @"Search"];
 	[searchBar setDelegate: self];
 
@@ -315,6 +353,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 - (void) viewWillAppear: (BOOL)animated
 {
+	[super viewWillAppear:animated];
 	[self setTitle: [key lastPathComponent]];
 
 	[slider setValue: current];
@@ -322,7 +361,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 	if ([[[UIDevice currentDevice] systemVersion] floatValue] >= 7.0)
 		[[[self navigationController] toolbar] addSubview:slider];
 
-	[indicator setText: [NSString stringWithFormat: @" %d of %d ", current+1, fz_count_pages(doc)]];
+	[indicator setText: [NSString stringWithFormat: @" %d of %d ", current+1, fz_count_pages(ctx, doc)]];
 
 	[[self navigationController] setToolbarHidden: NO animated: animated];
 }
@@ -336,7 +375,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 	height = size.height;
 
 	[canvas setContentInset: UIEdgeInsetsZero];
-	[canvas setContentSize: CGSizeMake(fz_count_pages(doc) * width, height)];
+	[canvas setContentSize: CGSizeMake(fz_count_pages(ctx, doc) * width, height)];
 	[canvas setContentOffset: CGPointMake(current * width, 0)];
 
 	[sliderWrapper setWidth: SLIDER_W];
@@ -352,7 +391,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 	[[[self navigationController] toolbar] setNeedsLayout]; // force layout!
 
 	// use max_width so we don't clamp the content offset too early during animation
-	[canvas setContentSize: CGSizeMake(fz_count_pages(doc) * max_width, height)];
+	[canvas setContentSize: CGSizeMake(fz_count_pages(ctx, doc) * max_width, height)];
 	[canvas setContentOffset: CGPointMake(current * width, 0)];
 
 	for (UIView<MuPageView> *view in [canvas subviews]) {
@@ -371,11 +410,13 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 - (void) viewDidAppear: (BOOL)animated
 {
+	[super viewDidAppear:animated];
 	[self scrollViewDidScroll: canvas];
 }
 
 - (void) viewWillDisappear: (BOOL)animated
 {
+	[super viewWillDisappear:animated];
 	if ([[[UIDevice currentDevice] systemVersion] floatValue] >= 7.0)
 		[slider removeFromSuperview];
 
@@ -453,6 +494,12 @@ static void saveDoc(char *current_path, fz_document *doc)
 - (void) onToggleReflow: (id)sender
 {
 	reflowMode = !reflowMode;
+
+	[annotButton setEnabled:!reflowMode];
+	[searchButton setEnabled:!reflowMode];
+	[linkButton setEnabled:!reflowMode];
+	[moreButton setEnabled:!reflowMode];
+
 	[[canvas subviews] makeObjectsPerformSelector:@selector(removeFromSuperview)];
 	[self scrollViewDidScroll:canvas];
 }
@@ -529,13 +576,15 @@ static void saveDoc(char *current_path, fz_document *doc)
 {
 	NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:filePath]];
 	UIActivityViewController *cont = [[UIActivityViewController alloc] initWithActivityItems:[NSArray arrayWithObject:url] applicationActivities:nil];
+	cont.popoverPresentationController.barButtonItem = shareButton;
 	[self presentViewController:cont animated:YES completion:nil];
+	[cont release];
 }
 
 - (void) onShare: (id)sender
 {
-	pdf_document *idoc = pdf_specifics(doc);
-	if (idoc && pdf_has_unsaved_changes(idoc))
+	pdf_document *idoc = pdf_specifics(ctx, doc);
+	if (idoc && pdf_has_unsaved_changes(ctx, idoc))
 	{
 		UIAlertView *alertView = [[UIAlertView alloc] initWithTitle:AlertTitle message:ShareAlertMessage delegate:self cancelButtonTitle:@"Cancel" otherButtonTitles:@"Save and Share", nil];
 		[alertView show];
@@ -696,8 +745,8 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 - (void) onBack: (id)sender
 {
-	pdf_document *idoc = pdf_specifics(doc);
-	if (idoc && pdf_has_unsaved_changes(idoc))
+	pdf_document *idoc = pdf_specifics(ctx, doc);
+	if (idoc && pdf_has_unsaved_changes(ctx, idoc))
 	{
 		UIAlertView *saveAlert = [[UIAlertView alloc]
 			initWithTitle:AlertTitle message:CloseAlertMessage delegate:self
@@ -779,7 +828,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 	cancelSearch = NO;
 
 	dispatch_async(queue, ^{
-		for (int i = start; i >= 0 && i < fz_count_pages(doc); i += dir) {
+		for (int i = start; i >= 0 && i < fz_count_pages(ctx, doc); i += dir) {
 			int n = search_page(doc, i, needle, NULL);
 			if (n) {
 				dispatch_async(dispatch_get_main_queue(), ^{
@@ -850,7 +899,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 {
 	int number = [slider value];
 	if ([slider isTracking])
-		[indicator setText: [NSString stringWithFormat: @" %d of %d ", number+1, fz_count_pages(doc)]];
+		[indicator setText: [NSString stringWithFormat: @" %d of %d ", number+1, fz_count_pages(ctx, doc)]];
 	else
 		[self gotoPage: number animated: NO];
 }
@@ -963,6 +1012,16 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 - (void) scrollViewDidScroll: (UIScrollView*)scrollview
 {
+	// scrollViewDidScroll seems to get called part way through a screen rotation.
+	// (This is possibly a UIScrollView bug - see
+	// http://stackoverflow.com/questions/4123991/uiscrollview-disable-scrolling-while-rotating-on-iphone-ipad/8141423#8141423 ).
+	// This ends up corrupting the current page number, because the calculation
+	// 'current = x / width' is using the new value of 'width' before the
+	// pages have been resized/repositioned. To avoid this problem, we filter out
+	// calls to scrollViewDidScroll during rotation.
+	if (_isRotating)
+		return;
+
 	if (width == 0)
 		return; // not visible yet
 
@@ -974,7 +1033,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 	[[NSUserDefaults standardUserDefaults] setInteger: current forKey: key];
 
-	[indicator setText: [NSString stringWithFormat: @" %d of %d ", current+1, fz_count_pages(doc)]];
+	[indicator setText: [NSString stringWithFormat: @" %d of %d ", current+1, fz_count_pages(ctx, doc)]];
 	[slider setValue: current];
 
 	// swap the distant page views out
@@ -1001,7 +1060,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 - (void) createPageView: (int)number
 {
-	if (number < 0 || number >= fz_count_pages(doc))
+	if (number < 0 || number >= fz_count_pages(ctx, doc))
 		return;
 	int found = 0;
 	for (UIView<MuPageView> *view in [canvas subviews])
@@ -1024,8 +1083,8 @@ static void saveDoc(char *current_path, fz_document *doc)
 {
 	if (number < 0)
 		number = 0;
-	if (number >= fz_count_pages(doc))
-		number = fz_count_pages(doc) - 1;
+	if (number >= fz_count_pages(ctx, doc))
+		number = fz_count_pages(ctx, doc) - 1;
 	if (current == number)
 		return;
 	if (animated) {
@@ -1048,7 +1107,7 @@ static void saveDoc(char *current_path, fz_document *doc)
 
 		[canvas setContentOffset: CGPointMake(number * width, 0)];
 		[slider setValue: number];
-		[indicator setText: [NSString stringWithFormat: @" %d of %d ", number+1, fz_count_pages(doc)]];
+		[indicator setText: [NSString stringWithFormat: @" %d of %d ", number+1, fz_count_pages(ctx, doc)]];
 
 		[UIView commitAnimations];
 	} else {
@@ -1086,9 +1145,19 @@ static void saveDoc(char *current_path, fz_document *doc)
 	return YES;
 }
 
+- (void) willRotateToInterfaceOrientation:(UIInterfaceOrientation)toInterfaceOrientation duration:(NSTimeInterval)duration
+{
+	_isRotating = YES;
+}
+
 - (void) didRotateFromInterfaceOrientation: (UIInterfaceOrientation)o
 {
-	[canvas setContentSize: CGSizeMake(fz_count_pages(doc) * width, height)];
+	_isRotating = NO;
+
+	// We need to set these here, because during the animation we may use a wider
+	// size (the maximum of the landscape/portrait widths), to avoid clipping during
+	// the rotation.
+	[canvas setContentSize: CGSizeMake(fz_count_pages(ctx, doc) * width, height)];
 	[canvas setContentOffset: CGPointMake(current * width, 0)];
 }
 

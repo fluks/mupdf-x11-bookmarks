@@ -2,10 +2,10 @@
 
 #import "MuLibraryController.h"
 
-@interface MuAppDelegate : NSObject <UIApplicationDelegate, UINavigationControllerDelegate>
+enum
 {
-	UIWindow *window;
-	UINavigationController *navigator;
-	MuLibraryController *library;
-}
+	ResourceCacheMaxSize = 128<<20	/**< use at most 128M for resource cache */
+};
+
+@interface MuAppDelegate : NSObject <UIApplicationDelegate>
 @end

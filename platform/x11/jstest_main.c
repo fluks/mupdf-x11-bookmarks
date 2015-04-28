@@ -14,7 +14,7 @@ static pdfapp_t gapp;
 static int file_open = 0;
 static char filename[1024] = "";
 static char *scriptname;
-static char *output = NULL;
+static char *output = "out%03d.png";
 static char *prefix = NULL;
 static int shotcount = 0;
 static int verbosity = 0;
@@ -150,12 +150,6 @@ void winfullscreen(pdfapp_t *app, int state)
 
 void windocopy(pdfapp_t *app)
 {
-}
-
-void winreloadfile(pdfapp_t *app)
-{
-	pdfapp_close(app);
-	pdfapp_open(app, filename, 1);
 }
 
 void winreloadpage(pdfapp_t *app)
@@ -426,7 +420,7 @@ main(int argc, char *argv[])
 	if (file_open)
 		pdfapp_close(&gapp);
 
-	fz_free_context(ctx);
+	fz_drop_context(ctx);
 
 	return 0;
 }
