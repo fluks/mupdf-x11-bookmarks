@@ -70,6 +70,7 @@ for f in *.pdf; do
     "$MUPDF" "$f" &>/dev/null &
     sleep 0.5
     send_keypresses_to_mupdf "Right B q"
+    sleep 0.1
     bookmark_is_written_to_file "$f"
 
     "$MUPDF" "$f" &>/dev/null &
