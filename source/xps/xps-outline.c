@@ -1,4 +1,8 @@
-#include "mupdf/xps.h"
+#include "mupdf/fitz.h"
+#include "xps-imp.h"
+
+#include <stdlib.h>
+#include <math.h>
 
 /*
  * Parse the document structure / outline parts referenced from fixdoc relationships.
@@ -30,11 +34,10 @@ xps_parse_document_outline(fz_context *ctx, xps_document *doc, fz_xml *root)
 			if (!target || !description)
 				continue;
 
-			entry = fz_malloc_struct(ctx, fz_outline);
-			entry->title = fz_strdup(ctx, description);
-			entry->dest.kind = FZ_LINK_GOTO;
-			entry->dest.ld.gotor.flags = 0;
-			entry->dest.ld.gotor.page = xps_lookup_link_target(ctx, doc, target);
+			entry = fz_new_outline(ctx);
+			entry->title = Memento_label(fz_strdup(ctx, description), "outline_title");
+			entry->uri = Memento_label(fz_strdup(ctx, target), "outline_uri");
+			entry->page = xps_lookup_link_target(ctx, (fz_document*)doc, target, NULL, NULL).page;
 			entry->down = NULL;
 			entry->next = NULL;
 
@@ -80,32 +83,21 @@ static fz_outline *
 xps_load_document_structure(fz_context *ctx, xps_document *doc, xps_fixdoc *fixdoc)
 {
 	xps_part *part;
-	fz_xml *root;
-	fz_outline *outline;
+	fz_xml_doc *xml = NULL;
+	fz_outline *outline = NULL;
+
+	fz_var(xml);
 
 	part = xps_read_part(ctx, doc, fixdoc->outline);
 	fz_try(ctx)
 	{
-		root = fz_parse_xml(ctx, part->data, part->size, 0);
+		xml = fz_parse_xml(ctx, part->data, 0, 0);
+		outline = xps_parse_document_structure(ctx, doc, fz_xml_root(xml));
 	}
 	fz_always(ctx)
 	{
+		fz_drop_xml(ctx, xml);
 		xps_drop_part(ctx, doc, part);
-	}
-	fz_catch(ctx)
-	{
-		fz_rethrow(ctx);
-	}
-	if (!root)
-		return NULL;
-
-	fz_try(ctx)
-	{
-		outline = xps_parse_document_structure(ctx, doc, root);
-	}
-	fz_always(ctx)
-	{
-		fz_drop_xml(ctx, root);
 	}
 	fz_catch(ctx)
 	{
@@ -116,10 +108,11 @@ xps_load_document_structure(fz_context *ctx, xps_document *doc, xps_fixdoc *fixd
 }
 
 fz_outline *
-xps_load_outline(fz_context *ctx, xps_document *doc)
+xps_load_outline(fz_context *ctx, fz_document *doc_)
 {
+	xps_document *doc = (xps_document*)doc_;
 	xps_fixdoc *fixdoc;
-	fz_outline *head = NULL, *tail, *outline;
+	fz_outline *head = NULL, *tail, *outline = NULL;
 
 	for (fixdoc = doc->first_fixdoc; fixdoc; fixdoc = fixdoc->next)
 	{

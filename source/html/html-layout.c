@@ -1,413 +1,263 @@
-#include "mupdf/html.h"
+#include "mupdf/fitz.h"
+#include "mupdf/ucdn.h"
+#include "html-imp.h"
+
+#include "hb.h"
+#include "hb-ft.h"
+#include <ft2build.h>
+
+#include <math.h>
+#include <assert.h>
+
+#undef DEBUG_HARFBUZZ
 
 enum { T, R, B, L };
 
-static const char *default_css =
-"html,address,blockquote,body,dd,div,dl,dt,h1,h2,h3,h4,h5,h6,ol,p,ul,center,hr,pre{display:block}"
-"span{display:inline}"
-"li{display:list-item}"
-"head{display:none}"
-"body{margin:1em}"
-"h1{font-size:2em;margin:.67em 0}"
-"h2{font-size:1.5em;margin:.75em 0}"
-"h3{font-size:1.17em;margin:.83em 0}"
-"h4,p,blockquote,ul,ol,dl,dir,menu{margin:1.12em 0}"
-"h5{font-size:.83em;margin:1.5em 0}"
-"h6{font-size:.67em;margin:1.67em 0}"
-"h1,h2,h3,h4,h5,h6,b,strong{font-weight:bold}"
-"blockquote{margin-left:40px;margin-right:40px}"
-"i,cite,em,var,address{font-style:italic}"
-"pre,tt,code,kbd,samp{font-family:monospace}"
-"pre{white-space:pre}"
-"big{font-size:1.17em}"
-"small,sub,sup{font-size:.83em}"
-"sub{vertical-align:sub}"
-"sup{vertical-align:super}"
-"s,strike,del{text-decoration:line-through}"
-"hr{border-width:thin;border-color:black;border-style:solid;margin:.5em 0}"
-"ol,ul,dir,menu,dd{margin-left:40px}"
-"ol{list-style-type:decimal}"
-"ol ul,ul ol,ul ul,ol ol{margin-top:0;margin-bottom:0}"
-"u,ins{text-decoration:underline}"
-"center{text-align:center}"
-"svg{display:none}"
-"a{color:blue}"
-"tr{display:block}" /* ugly hack! */
-;
-
-static int iswhite(int c)
+typedef struct string_walker
 {
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
+	fz_context *ctx;
+	hb_buffer_t *hb_buf;
+	int rtl;
+	const char *start;
+	const char *end;
+	const char *s;
+	fz_font *base_font;
+	int script;
+	int language;
+	int small_caps;
+	fz_font *font;
+	fz_font *next_font;
+	hb_glyph_position_t *glyph_pos;
+	hb_glyph_info_t *glyph_info;
+	unsigned int glyph_count;
+	int scale;
+} string_walker;
 
-static void fz_drop_html_flow(fz_context *ctx, fz_html_flow *flow)
+static int quick_ligature_mov(fz_context *ctx, string_walker *walker, unsigned int i, unsigned int n, int unicode)
 {
-	while (flow)
+	unsigned int k;
+	for (k = i + n + 1; k < walker->glyph_count; ++k)
 	{
-		fz_html_flow *next = flow->next;
-		if (flow->type == FLOW_WORD)
-			fz_free(ctx, flow->text);
-		if (flow->type == FLOW_IMAGE)
-			fz_drop_image(ctx, flow->image);
-		fz_free(ctx, flow);
-		flow = next;
+		walker->glyph_info[k-n] = walker->glyph_info[k];
+		walker->glyph_pos[k-n] = walker->glyph_pos[k];
 	}
+	walker->glyph_count -= n;
+	return unicode;
 }
 
-static fz_html_flow *add_flow(fz_context *ctx, fz_html *top, fz_css_style *style, int type)
+static int quick_ligature(fz_context *ctx, string_walker *walker, unsigned int i)
 {
-	fz_html_flow *flow = fz_malloc_struct(ctx, fz_html_flow);
-	flow->type = type;
-	flow->style = style;
-	*top->flow_tail = flow;
-	top->flow_tail = &flow->next;
-	return flow;
-}
-
-static void add_flow_space(fz_context *ctx, fz_html *top, fz_css_style *style)
-{
-	fz_html_flow *flow;
-
-	/* delete space at the beginning of the line */
-	if (!top->flow_head)
-		return;
-
-	flow = add_flow(ctx, top, style, FLOW_GLUE);
-	flow->text = " ";
-	flow->broken_text = "";
-}
-
-static void add_flow_word(fz_context *ctx, fz_html *top, fz_css_style *style, const char *a, const char *b)
-{
-	fz_html_flow *flow = add_flow(ctx, top, style, FLOW_WORD);
-	flow->text = fz_malloc(ctx, b - a + 1);
-	memcpy(flow->text, a, b - a);
-	flow->text[b - a] = 0;
-}
-
-static void add_flow_image(fz_context *ctx, fz_html *top, fz_css_style *style, fz_image *img)
-{
-	fz_html_flow *flow = add_flow(ctx, top, style, FLOW_IMAGE);
-	flow->image = fz_keep_image(ctx, img);
-}
-
-static void generate_text(fz_context *ctx, fz_html *box, const char *text)
-{
-	fz_html *flow = box;
-	while (flow->type != BOX_FLOW)
-		flow = flow->up;
-
-	while (*text)
+	if (walker->glyph_info[i].codepoint == 'f' && i + 1 < walker->glyph_count && !fz_font_flags(walker->font)->is_mono)
 	{
-		if (iswhite(*text))
+		if (walker->glyph_info[i+1].codepoint == 'f')
 		{
-			++text;
-			while (iswhite(*text))
-				++text;
-			add_flow_space(ctx, flow, &box->style);
+			if (i + 2 < walker->glyph_count && walker->glyph_info[i+2].codepoint == 'i')
+			{
+				if (fz_encode_character(ctx, walker->font, 0xFB03))
+					return quick_ligature_mov(ctx, walker, i, 2, 0xFB03);
+			}
+			if (i + 2 < walker->glyph_count && walker->glyph_info[i+2].codepoint == 'l')
+			{
+				if (fz_encode_character(ctx, walker->font, 0xFB04))
+					return quick_ligature_mov(ctx, walker, i, 2, 0xFB04);
+			}
+			if (fz_encode_character(ctx, walker->font, 0xFB00))
+				return quick_ligature_mov(ctx, walker, i, 1, 0xFB00);
 		}
-		if (*text)
+		if (walker->glyph_info[i+1].codepoint == 'i')
 		{
-			const char *mark = text++;
-			while (*text && !iswhite(*text))
-				++text;
-			add_flow_word(ctx, flow, &box->style, mark, text);
+			if (fz_encode_character(ctx, walker->font, 0xFB01))
+				return quick_ligature_mov(ctx, walker, i, 1, 0xFB01);
+		}
+		if (walker->glyph_info[i+1].codepoint == 'l')
+		{
+			if (fz_encode_character(ctx, walker->font, 0xFB02))
+				return quick_ligature_mov(ctx, walker, i, 1, 0xFB02);
 		}
 	}
+	return walker->glyph_info[i].codepoint;
 }
 
-static void generate_image(fz_context *ctx, fz_archive *zip, const char *base_uri, fz_html *box, const char *src)
+static void init_string_walker(fz_context *ctx, string_walker *walker, hb_buffer_t *hb_buf, int rtl, fz_font *font, int script, int language, int small_caps, const char *text)
 {
-	fz_image *img;
-	fz_buffer *buf;
-	char path[2048];
+	walker->ctx = ctx;
+	walker->hb_buf = hb_buf;
+	walker->rtl = rtl;
+	walker->start = text;
+	walker->end = text;
+	walker->s = text;
+	walker->base_font = font;
+	walker->script = script;
+	walker->language = language;
+	walker->font = NULL;
+	walker->next_font = NULL;
+	walker->small_caps = small_caps;
+}
 
-	fz_html *flow = box;
-	while (flow->type != BOX_FLOW)
-		flow = flow->up;
+static void
+destroy_hb_shaper_data(fz_context *ctx, void *handle)
+{
+	fz_hb_lock(ctx);
+	hb_font_destroy(handle);
+	fz_hb_unlock(ctx);
+}
 
-	fz_strlcpy(path, base_uri, sizeof path);
-	fz_strlcat(path, "/", sizeof path);
-	fz_strlcat(path, src, sizeof path);
-	fz_cleanname(path);
+static const hb_feature_t small_caps_feature[1] = {
+	{ HB_TAG('s','m','c','p'), 1, 0, -1 }
+};
 
+static int walk_string(string_walker *walker)
+{
+	fz_context *ctx = walker->ctx;
+	FT_Face face;
+	int fterr;
+	int quickshape;
+	char lang[8];
+
+	walker->start = walker->end;
+	walker->end = walker->s;
+	walker->font = walker->next_font;
+
+	if (*walker->start == 0)
+		return 0;
+
+	/* Run through the string, encoding chars until we find one
+	 * that requires a different fallback font. */
+	while (*walker->s)
+	{
+		int c;
+
+		walker->s += fz_chartorune(&c, walker->s);
+		(void)fz_encode_character_with_fallback(ctx, walker->base_font, c, walker->script, walker->language, &walker->next_font);
+		if (walker->next_font != walker->font)
+		{
+			if (walker->font != NULL)
+				break;
+			walker->font = walker->next_font;
+		}
+		walker->end = walker->s;
+	}
+
+	/* Disable harfbuzz shaping if script is common or LGC and there are no opentype tables. */
+	quickshape = 0;
+	if (walker->script <= 3 && !walker->rtl && !fz_font_flags(walker->font)->has_opentype)
+		quickshape = 1;
+
+	fz_hb_lock(ctx);
 	fz_try(ctx)
 	{
-		buf = fz_read_archive_entry(ctx, zip, path);
-		img = fz_new_image_from_buffer(ctx, buf);
-		fz_drop_buffer(ctx, buf);
+		face = fz_font_ft_face(ctx, walker->font);
+		walker->scale = face->units_per_EM;
+		fterr = FT_Set_Char_Size(face, walker->scale, walker->scale, 72, 72);
+		if (fterr)
+			fz_throw(ctx, FZ_ERROR_GENERIC, "freetype setting character size: %s", ft_error_string(fterr));
 
-		add_flow_image(ctx, flow, &box->style, img);
+		hb_buffer_clear_contents(walker->hb_buf);
+		hb_buffer_set_direction(walker->hb_buf, walker->rtl ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
+		/* hb_buffer_set_script(walker->hb_buf, hb_ucdn_script_translate(walker->script)); */
+		if (walker->language)
+		{
+			fz_string_from_text_language(lang, walker->language);
+			Memento_startLeaking(); /* HarfBuzz leaks harmlessly */
+			hb_buffer_set_language(walker->hb_buf, hb_language_from_string(lang, (int)strlen(lang)));
+			Memento_stopLeaking(); /* HarfBuzz leaks harmlessly */
+		}
+		/* hb_buffer_set_cluster_level(hb_buf, HB_BUFFER_CLUSTER_LEVEL_CHARACTERS); */
+
+		hb_buffer_add_utf8(walker->hb_buf, walker->start, walker->end - walker->start, 0, -1);
+
+		if (!quickshape)
+		{
+			fz_shaper_data_t *hb = fz_font_shaper_data(ctx, walker->font);
+			Memento_startLeaking(); /* HarfBuzz leaks harmlessly */
+			if (hb->shaper_handle == NULL)
+			{
+				hb->destroy = destroy_hb_shaper_data;
+				hb->shaper_handle = hb_ft_font_create(face, NULL);
+			}
+
+			hb_buffer_guess_segment_properties(walker->hb_buf);
+
+			if (walker->small_caps)
+				hb_shape(hb->shaper_handle, walker->hb_buf, small_caps_feature, nelem(small_caps_feature));
+			else
+				hb_shape(hb->shaper_handle, walker->hb_buf, NULL, 0);
+			Memento_stopLeaking();
+		}
+
+		walker->glyph_pos = hb_buffer_get_glyph_positions(walker->hb_buf, &walker->glyph_count);
+		walker->glyph_info = hb_buffer_get_glyph_infos(walker->hb_buf, NULL);
+	}
+	fz_always(ctx)
+	{
+		fz_hb_unlock(ctx);
 	}
 	fz_catch(ctx)
 	{
-		const char *alt = "[image]";
-		fz_warn(ctx, "html: cannot add image src='%s'", src);
-		add_flow_word(ctx, flow, &box->style, alt, alt + 7);
+		fz_rethrow(ctx);
 	}
-}
 
-static void init_box(fz_context *ctx, fz_html *box)
-{
-	box->type = BOX_BLOCK;
-	box->x = box->y = 0;
-	box->w = box->h = 0;
-
-	box->up = NULL;
-	box->last = NULL;
-	box->down = NULL;
-	box->next = NULL;
-
-	box->flow_head = NULL;
-	box->flow_tail = &box->flow_head;
-
-	fz_default_css_style(ctx, &box->style);
-}
-
-void fz_drop_html(fz_context *ctx, fz_html *box)
-{
-	while (box)
+	if (quickshape)
 	{
-		fz_html *next = box->next;
-		fz_drop_html_flow(ctx, box->flow_head);
-		fz_drop_html(ctx, box->down);
-		fz_free(ctx, box);
-		box = next;
-	}
-}
-
-static fz_html *new_box(fz_context *ctx)
-{
-	fz_html *box = fz_malloc_struct(ctx, fz_html);
-	init_box(ctx, box);
-	return box;
-}
-
-static void insert_box(fz_context *ctx, fz_html *box, int type, fz_html *top)
-{
-	box->type = type;
-
-	box->up = top;
-
-	if (top)
-	{
-		if (!top->last)
+		unsigned int i;
+		for (i = 0; i < walker->glyph_count; ++i)
 		{
-			top->down = top->last = box;
-		}
-		else
-		{
-			top->last->next = box;
-			top->last = box;
-		}
-	}
-}
-
-static fz_html *insert_block_box(fz_context *ctx, fz_html *box, fz_html *top)
-{
-	if (top->type == BOX_BLOCK)
-	{
-		insert_box(ctx, box, BOX_BLOCK, top);
-	}
-	else if (top->type == BOX_FLOW)
-	{
-		while (top->type != BOX_BLOCK)
-			top = top->up;
-		insert_box(ctx, box, BOX_BLOCK, top);
-	}
-	else if (top->type == BOX_INLINE)
-	{
-		while (top->type != BOX_BLOCK)
-			top = top->up;
-		insert_box(ctx, box, BOX_BLOCK, top);
-	}
-	return top;
-}
-
-static fz_html *insert_break_box(fz_context *ctx, fz_html *box, fz_html *top)
-{
-	if (top->type == BOX_BLOCK)
-	{
-		insert_box(ctx, box, BOX_BREAK, top);
-	}
-	else if (top->type == BOX_FLOW)
-	{
-		while (top->type != BOX_BLOCK)
-			top = top->up;
-		insert_box(ctx, box, BOX_BREAK, top);
-	}
-	else if (top->type == BOX_INLINE)
-	{
-		while (top->type != BOX_BLOCK)
-			top = top->up;
-		insert_box(ctx, box, BOX_BREAK, top);
-	}
-	return top;
-}
-
-static void insert_inline_box(fz_context *ctx, fz_html *box, fz_html *top)
-{
-	if (top->type == BOX_BLOCK)
-	{
-		if (top->last && top->last->type == BOX_FLOW)
-		{
-			insert_box(ctx, box, BOX_INLINE, top->last);
-		}
-		else
-		{
-			fz_html *flow = new_box(ctx);
-			flow->is_first_flow = !top->last;
-			insert_box(ctx, flow, BOX_FLOW, top);
-			insert_box(ctx, box, BOX_INLINE, flow);
-		}
-	}
-	else if (top->type == BOX_FLOW)
-	{
-		insert_box(ctx, box, BOX_INLINE, top);
-	}
-	else if (top->type == BOX_INLINE)
-	{
-		insert_box(ctx, box, BOX_INLINE, top);
-	}
-}
-
-static void generate_boxes(fz_context *ctx, fz_html_font_set *set, fz_archive *zip, const char *base_uri,
-	fz_xml *node, fz_html *top, fz_css_rule *rule, fz_css_match *up_match, int list_counter)
-{
-	fz_css_match match;
-	fz_html *box;
-	const char *tag;
-	int display;
-
-	while (node)
-	{
-		match.up = up_match;
-		match.count = 0;
-
-		tag = fz_xml_tag(node);
-		if (tag)
-		{
-			fz_match_css(ctx, &match, rule, node);
-
-			display = fz_get_css_match_display(&match);
-
-			if (!strcmp(tag, "br"))
-			{
-				box = new_box(ctx);
-				fz_apply_css_style(ctx, set, &box->style, &match);
-				top = insert_break_box(ctx, box, top);
-			}
-
-			else if (!strcmp(tag, "img"))
-			{
-				const char *src = fz_xml_att(node, "src");
-				if (src)
-				{
-					box = new_box(ctx);
-					fz_apply_css_style(ctx, set, &box->style, &match);
-					insert_inline_box(ctx, box, top);
-					generate_image(ctx, zip, base_uri, box, src);
-				}
-			}
-
-			else if (display != DIS_NONE)
-			{
-				box = new_box(ctx);
-				fz_apply_css_style(ctx, set, &box->style, &match);
-
-				if (display == DIS_BLOCK)
-				{
-					top = insert_block_box(ctx, box, top);
-				}
-				else if (display == DIS_LIST_ITEM)
-				{
-					top = insert_block_box(ctx, box, top);
-					box->list_item = ++list_counter;
-				}
-				else if (display == DIS_INLINE)
-				{
-					insert_inline_box(ctx, box, top);
-				}
-				else
-				{
-					fz_warn(ctx, "unknown box display type");
-					insert_box(ctx, box, BOX_BLOCK, top);
-				}
-
-				if (fz_xml_down(node))
-				{
-					int child_counter = list_counter;
-					if (!strcmp(tag, "ul") || !strcmp(tag, "ol"))
-						child_counter = 0;
-					generate_boxes(ctx, set, zip, base_uri, fz_xml_down(node), box, rule, &match, child_counter);
-				}
-
-				// TODO: remove empty flow boxes
-			}
-		}
-		else
-		{
-			if (top->type != BOX_INLINE)
-			{
-				/* Create anonymous inline box, with the same style as the top block box. */
-				box = new_box(ctx);
-				insert_inline_box(ctx, box, top);
-				box->style = top->style;
-				/* Make sure not to recursively multiply font sizes. */
-				box->style.font_size.value = 1;
-				box->style.font_size.unit = N_SCALE;
-				generate_text(ctx, box, fz_xml_text(node));
-			}
+			int glyph, unicode;
+			unicode = quick_ligature(ctx, walker, i);
+			if (walker->small_caps)
+				glyph = fz_encode_character_sc(ctx, walker->font, unicode);
 			else
-			{
-				generate_text(ctx, top, fz_xml_text(node));
-			}
+				glyph = fz_encode_character(ctx, walker->font, unicode);
+			walker->glyph_info[i].codepoint = glyph;
+			walker->glyph_pos[i].x_offset = 0;
+			walker->glyph_pos[i].y_offset = 0;
+			walker->glyph_pos[i].x_advance = fz_advance_glyph(ctx, walker->font, glyph, 0) * face->units_per_EM;
+			walker->glyph_pos[i].y_advance = 0;
 		}
-
-		node = fz_xml_next(node);
 	}
+
+	return 1;
 }
 
-static void measure_image(fz_context *ctx, fz_html_flow *node, float w, float h)
+static const char *get_node_text(fz_context *ctx, fz_html_flow *node)
 {
-	float xs = 1, ys = 1, s = 1;
-	node->x = 0;
-	node->y = 0;
-	if (node->image->w > w)
-		xs = w / node->image->w;
-	if (node->image->h > h)
-		ys = h / node->image->h;
-	s = fz_min(xs, ys);
-	node->w = node->image->w * s;
-	node->h = node->image->h * s;
+	if (node->type == FLOW_WORD)
+		return node->content.text;
+	else if (node->type == FLOW_SPACE)
+		return " ";
+	else if (node->type == FLOW_SHYPHEN)
+		return "-";
+	else
+		return "";
 }
 
-static void measure_word(fz_context *ctx, fz_html_flow *node, float em)
+static void measure_string(fz_context *ctx, fz_html_flow *node, hb_buffer_t *hb_buf)
 {
+	string_walker walker;
+	unsigned int i;
 	const char *s;
-	int c, g;
-	float w;
+	float em;
 
-	em = fz_from_css_number(node->style->font_size, em, em);
+	em = node->box->em;
 	node->x = 0;
 	node->y = 0;
-	node->h = fz_from_css_number_scale(node->style->line_height, em, em, em);
+	node->w = 0;
+	node->h = fz_from_css_number_scale(node->box->style->line_height, em);
 
-	w = 0;
-	s = node->text;
-	while (*s)
+	s = get_node_text(ctx, node);
+	init_string_walker(ctx, &walker, hb_buf, node->bidi_level & 1, node->box->style->font, node->script, node->markup_lang, node->box->style->small_caps, s);
+	while (walk_string(&walker))
 	{
-		s += fz_chartorune(&c, s);
-		g = fz_encode_character(ctx, node->style->font, c);
-		w += fz_advance_glyph(ctx, node->style->font, g) * em;
+		int x = 0;
+		for (i = 0; i < walker.glyph_count; i++)
+			x += walker.glyph_pos[i].x_advance;
+		node->w += x * em / walker.scale;
 	}
-	node->w = w;
-	node->em = em;
 }
 
 static float measure_line(fz_html_flow *node, fz_html_flow *end, float *baseline)
 {
-	float max_a = 0, max_d = 0, h = 0;
+	float max_a = 0, max_d = 0, h = node->h;
 	while (node != end)
 	{
 		if (node->type == FLOW_IMAGE)
@@ -417,8 +267,8 @@ static float measure_line(fz_html_flow *node, fz_html_flow *end, float *baseline
 		}
 		else
 		{
-			float a = node->em * 0.8;
-			float d = node->em * 0.2;
+			float a = node->box->em * 0.8f;
+			float d = node->box->em * 0.2f;
 			if (a > max_a) max_a = a;
 			if (d > max_d) max_d = d;
 		}
@@ -430,281 +280,634 @@ static float measure_line(fz_html_flow *node, fz_html_flow *end, float *baseline
 	return h;
 }
 
-static void layout_line(fz_context *ctx, float indent, float page_w, float line_w, int align, fz_html_flow *node, fz_html_flow *end, fz_html *box, float baseline)
+static void layout_line(fz_context *ctx, float indent, float page_w, float line_w, int align, fz_html_flow *start, fz_html_flow *end, fz_html_box *box, float baseline, float line_h)
 {
 	float x = box->x + indent;
-	float y = box->y + box->h;
+	float y = box->b;
 	float slop = page_w - line_w;
 	float justify = 0;
 	float va;
-	int n = 0;
+	int n, i;
+	fz_html_flow *node;
+	fz_html_flow **reorder;
+	unsigned int min_level, max_level;
+
+	/* Count the number of nodes on the line */
+	for(i = 0, n = 0, node = start; node != end; node = node->next)
+	{
+		n++;
+		if (node->type == FLOW_SPACE && node->expand && !node->breaks_line)
+			i++;
+	}
 
 	if (align == TA_JUSTIFY)
 	{
-		fz_html_flow *it;
-		for (it = node; it != end; it = it->next)
-			if (it->type == FLOW_GLUE)
-				++n;
-		justify = slop / n;
+		justify = slop / i;
 	}
 	else if (align == TA_RIGHT)
 		x += slop;
 	else if (align == TA_CENTER)
 		x += slop / 2;
 
-	while (node != end)
+	/* We need a block to hold the node pointers while we reorder */
+	reorder = fz_malloc_array(ctx, n, fz_html_flow*);
+	min_level = start->bidi_level;
+	max_level = start->bidi_level;
+	for(i = 0, node = start; node != end; i++, node = node->next)
 	{
-		switch (node->style->vertical_align)
+		reorder[i] = node;
+		if (node->bidi_level < min_level)
+			min_level = node->bidi_level;
+		if (node->bidi_level > max_level)
+			max_level = node->bidi_level;
+	}
+
+	/* Do we need to do any reordering? */
+	if (min_level != max_level || (min_level & 1))
+	{
+		/* The lowest level we swap is always a rtl one */
+		min_level |= 1;
+		/* Each time around the loop we swap runs of fragments that have
+		 * levels >= max_level (and decrement max_level). */
+		do
+		{
+			int start = 0;
+			int end;
+			do
+			{
+				/* Skip until we find a level that's >= max_level */
+				while (start < n && reorder[start]->bidi_level < max_level)
+					start++;
+				/* If start >= n-1 then no more runs. */
+				if (start >= n-1)
+					break;
+				/* Find the end of the match */
+				i = start+1;
+				while (i < n && reorder[i]->bidi_level >= max_level)
+					i++;
+				/* Reverse from start to i-1 */
+				end = i-1;
+				while (start < end)
+				{
+					fz_html_flow *t = reorder[start];
+					reorder[start++] = reorder[end];
+					reorder[end--] = t;
+				}
+				start = i+1;
+			}
+			while (start < n);
+			max_level--;
+		}
+		while (max_level >= min_level);
+	}
+
+	for (i = 0; i < n; i++)
+	{
+		float w;
+
+		node = reorder[i];
+		w = node->w;
+
+		if (node->type == FLOW_SPACE && node->breaks_line)
+			w = 0;
+		else if (node->type == FLOW_SPACE && !node->breaks_line)
+			w += node->expand ? justify : 0;
+		else if (node->type == FLOW_SHYPHEN && !node->breaks_line)
+			w = 0;
+		else if (node->type == FLOW_SHYPHEN && node->breaks_line)
+			w = node->w;
+
+		node->x = x;
+		x += w;
+
+		switch (node->box->style->vertical_align)
 		{
 		default:
 		case VA_BASELINE:
 			va = 0;
 			break;
 		case VA_SUB:
-			va = node->em * 0.2f;
+			va = node->box->em * 0.2f;
 			break;
 		case VA_SUPER:
-			va = node->em * -0.3f;
+			va = node->box->em * -0.3f;
+			break;
+		case VA_TOP:
+		case VA_TEXT_TOP:
+			va = -baseline + node->box->em * 0.8f;
+			break;
+		case VA_BOTTOM:
+		case VA_TEXT_BOTTOM:
+			va = -baseline + line_h - node->box->em * 0.2f;
 			break;
 		}
-		node->x = x;
+
 		if (node->type == FLOW_IMAGE)
 			node->y = y + baseline - node->h;
 		else
+		{
 			node->y = y + baseline + va;
-		x += node->w;
-		if (node->type == FLOW_GLUE)
-			x += justify;
-		node = node->next;
+			node->h = node->box->em;
+		}
 	}
+
+	fz_free(ctx, reorder);
 }
 
-static fz_html_flow *find_next_glue(fz_html_flow *node, float *w)
-{
-	while (node && node->type == FLOW_GLUE)
-	{
-		*w += node->w;
-		node = node->next;
-	}
-	while (node && node->type != FLOW_GLUE)
-	{
-		*w += node->w;
-		node = node->next;
-	}
-	return node;
-}
-
-static fz_html_flow *find_next_word(fz_html_flow *node, float *w)
-{
-	while (node && node->type == FLOW_GLUE)
-	{
-		*w += node->w;
-		node = node->next;
-	}
-	return node;
-}
-
-static void find_accumulated_margins(fz_context *ctx, fz_html *box, float *w, float *h)
+static void find_accumulated_margins(fz_context *ctx, fz_html_box *box, float *w, float *h)
 {
 	while (box)
 	{
-		/* TODO: take into account collapsed margins */
-		*h += box->margin[T] + box->padding[T] + box->border[T];
-		*h += box->margin[B] + box->padding[B] + box->border[B];
-		*w += box->margin[L] + box->padding[L] + box->border[L];
-		*w += box->margin[R] + box->padding[R] + box->border[R];
+		if (fz_html_box_has_boxes(box)) {
+			/* TODO: take into account collapsed margins */
+			*h += box->margin[T] + box->padding[T] + box->border[T];
+			*h += box->margin[B] + box->padding[B] + box->border[B];
+			*w += box->margin[L] + box->padding[L] + box->border[L];
+			*w += box->margin[R] + box->padding[R] + box->border[R];
+		}
 		box = box->up;
 	}
 }
 
-static void layout_flow(fz_context *ctx, fz_html *box, fz_html *top, float em, float page_h)
+static void flush_line(fz_context *ctx, fz_html_box *box, float page_h, float page_w, float line_w, int align, float indent, fz_html_flow *a, fz_html_flow *b)
 {
-	fz_html_flow *node, *line_start, *word_start, *word_end, *line_end;
-	float glue_w;
-	float word_w;
-	float line_w;
-	float indent;
-	float avail, line_h;
-	float baseline;
-	int align;
+	float avail, line_h, baseline;
+	line_h = measure_line(a, b, &baseline);
+	if (page_h > 0)
+	{
+		avail = page_h - fmodf(box->b, page_h);
+		if (line_h > avail)
+			box->b += avail;
+	}
+	layout_line(ctx, indent, page_w, line_w, align, a, b, box, baseline, line_h);
+	box->b += line_h;
+}
 
-	em = fz_from_css_number(box->style.font_size, em, em);
-	indent = box->is_first_flow ? fz_from_css_number(top->style.text_indent, em, top->w) : 0;
-	align = top->style.text_align;
+static void layout_flow_inline(fz_context *ctx, fz_html_box *box, fz_html_box *top)
+{
+	while (box)
+	{
+		box->y = top->y;
+		box->em = fz_from_css_number(box->style->font_size, top->em, top->em, top->em);
+		if (box->down)
+			layout_flow_inline(ctx, box->down, box);
+		box = box->next;
+	}
+}
+
+static void layout_flow(fz_context *ctx, fz_html_box *box, fz_html_box *top, float page_h, hb_buffer_t *hb_buf)
+{
+	fz_html_flow *node, *line, *candidate;
+	float line_w, candidate_w, indent, break_w, nonbreak_w;
+	int line_align, align;
+
+	float em = box->em = fz_from_css_number(box->style->font_size, top->em, top->em, top->em);
+	indent = box->is_first_flow ? fz_from_css_number(top->style->text_indent, em, top->w, 0) : 0;
+	align = top->style->text_align;
+
+	if (box->markup_dir == FZ_BIDI_RTL)
+	{
+		if (align == TA_LEFT)
+			align = TA_RIGHT;
+		else if (align == TA_RIGHT)
+			align = TA_LEFT;
+	}
 
 	box->x = top->x;
-	box->y = top->y + top->h;
+	box->y = top->b;
 	box->w = top->w;
-	box->h = 0;
+	box->b = box->y;
 
 	if (!box->flow_head)
 		return;
 
+	if (box->down)
+		layout_flow_inline(ctx, box->down, box);
+
 	for (node = box->flow_head; node; node = node->next)
 	{
+		node->breaks_line = 0; /* reset line breaks from previous layout */
 		if (node->type == FLOW_IMAGE)
 		{
-			float w = 0, h = 0;
-			find_accumulated_margins(ctx, box, &w, &h);
-			measure_image(ctx, node, top->w - w, page_h - h);
+			float margin_w = 0, margin_h = 0;
+			float max_w, max_h;
+			float xs = 1, ys = 1, s;
+
+			find_accumulated_margins(ctx, box, &margin_w, &margin_h);
+			max_w = top->w - margin_w;
+			max_h = page_h - margin_h;
+
+			/* NOTE: We ignore the image DPI here, since most images in EPUB files have bogus values. */
+			node->w = node->content.image->w * 72 / 96;
+			node->h = node->content.image->h * 72 / 96;
+
+			node->w = fz_from_css_number(node->box->style->width, top->em, top->w - margin_w, node->w);
+			node->h = fz_from_css_number(node->box->style->height, top->em, page_h - margin_h, node->h);
+
+			/* Shrink image to fit on one page if needed */
+			if (max_w > 0 && node->w > max_w)
+				xs = max_w / node->w;
+			if (max_h > 0 && node->h > max_h)
+				ys = max_h / node->h;
+			s = fz_min(xs, ys);
+			node->w = node->w * s;
+			node->h = node->h * s;
+
 		}
 		else
 		{
-			measure_word(ctx, node, em);
+			measure_string(ctx, node, hb_buf);
 		}
 	}
 
-	line_start = find_next_word(box->flow_head, &glue_w);
-	line_end = NULL;
+	node = box->flow_head;
 
+	candidate = NULL;
+	candidate_w = 0;
+	line = node;
 	line_w = indent;
-	word_w = 0;
-	word_start = line_start;
-	while (word_start)
+
+	while (node)
 	{
-		word_end = find_next_glue(word_start, &word_w);
-		if (line_w + word_w <= top->w)
+		switch (node->type)
 		{
-			line_w += word_w;
-			glue_w = 0;
-			line_end = word_end;
-			word_start = find_next_word(word_end, &glue_w);
-			word_w = glue_w;
+		default:
+		case FLOW_WORD:
+		case FLOW_IMAGE:
+			nonbreak_w = break_w = node->w;
+			break;
+
+		case FLOW_SHYPHEN:
+		case FLOW_SBREAK:
+		case FLOW_SPACE:
+			nonbreak_w = break_w = 0;
+
+			/* Determine broken and unbroken widths of this node. */
+			if (node->type == FLOW_SPACE)
+				nonbreak_w = node->w;
+			else if (node->type == FLOW_SHYPHEN)
+				break_w = node->w;
+
+			/* If the broken node fits, remember it. */
+			/* Also remember it if we have no other candidate and need to break in desperation. */
+			if (line_w + break_w <= box->w || !candidate)
+			{
+				candidate = node;
+				candidate_w = line_w + break_w;
+			}
+			break;
+
+		case FLOW_BREAK:
+			nonbreak_w = break_w = 0;
+			candidate = node;
+			candidate_w = line_w;
+			break;
 		}
-		else
+
+		/* The current node either does not fit or we saw a hard break. */
+		/* Break the line if we have a candidate break point. */
+		if (node->type == FLOW_BREAK || (line_w + nonbreak_w > box->w && candidate))
 		{
-			avail = page_h - fmodf(box->y + box->h, page_h);
-			line_h = measure_line(line_start, line_end, &baseline);
-			if (line_h > avail)
-				box->h += avail;
-			layout_line(ctx, indent, top->w, line_w, align, line_start, line_end, box, baseline);
-			box->h += line_h;
-			word_start = find_next_word(line_end, &glue_w);
-			line_start = word_start;
-			line_end = NULL;
+			candidate->breaks_line = 1;
+			if (candidate->type == FLOW_BREAK)
+				line_align = (align == TA_JUSTIFY) ? TA_LEFT : align;
+			else
+				line_align = align;
+			flush_line(ctx, box, page_h, box->w, candidate_w, line_align, indent, line, candidate->next);
+
+			line = candidate->next;
+			node = candidate->next;
+			candidate = NULL;
+			candidate_w = 0;
 			indent = 0;
 			line_w = 0;
-			word_w = 0;
+		}
+		else
+		{
+			line_w += nonbreak_w;
+			node = node->next;
 		}
 	}
 
-	/* don't justify the last line of a paragraph */
-	if (align == TA_JUSTIFY)
-		align = TA_LEFT;
-
-	if (line_start)
+	if (line)
 	{
-		avail = page_h - fmodf(box->y + box->h, page_h);
-		line_h = measure_line(line_start, line_end, &baseline);
-		if (line_h > avail)
-			box->h += avail;
-		layout_line(ctx, indent, top->w, line_w, align, line_start, line_end, box, baseline);
-		box->h += line_h;
+		line_align = (align == TA_JUSTIFY) ? TA_LEFT : align;
+		flush_line(ctx, box, page_h, box->w, line_w, line_align, indent, line, NULL);
 	}
 }
 
-static void layout_block(fz_context *ctx, fz_html *box, fz_html *top, float em, float top_collapse_margin, float page_h)
+static int layout_block_page_break(fz_context *ctx, float *yp, float page_h, float vertical, int page_break)
 {
-	fz_html *child;
-	float box_collapse_margin;
-	int prev_br;
+	if (page_h <= 0)
+		return 0;
+	if (page_break == PB_ALWAYS || page_break == PB_LEFT || page_break == PB_RIGHT)
+	{
+		float avail = page_h - fmodf(*yp - vertical, page_h);
+		int number = (*yp + (page_h * 0.1f)) / page_h;
+		if (avail > 0 && avail < page_h)
+		{
+			*yp += avail - vertical;
+			if (page_break == PB_LEFT && (number & 1) == 0) /* right side pages are even */
+				*yp += page_h;
+			if (page_break == PB_RIGHT && (number & 1) == 1) /* left side pages are odd */
+				*yp += page_h;
+			return 1;
+		}
+	}
+	return 0;
+}
 
+static float layout_block(fz_context *ctx, fz_html_box *box, float em, float top_x, float *top_b, float top_w,
+		float page_h, float vertical, hb_buffer_t *hb_buf);
+
+static void layout_table(fz_context *ctx, fz_html_box *box, fz_html_box *top, float page_h, hb_buffer_t *hb_buf)
+{
+	fz_html_box *row, *cell, *child;
+	int col, ncol = 0;
+
+	box->em = fz_from_css_number(box->style->font_size, top->em, top->em, top->em);
+	box->x = top->x;
+	box->w = fz_from_css_number(box->style->width, box->em, top->w, top->w);
+	box->y = box->b = top->b;
+
+	for (row = box->down; row; row = row->next)
+	{
+		col = 0;
+		for (cell = row->down; cell; cell = cell->next)
+			++col;
+		if (col > ncol)
+			ncol = col;
+	}
+
+	for (row = box->down; row; row = row->next)
+	{
+		col = 0;
+
+		row->em = fz_from_css_number(row->style->font_size, box->em, box->em, box->em);
+		row->x = box->x;
+		row->w = box->w;
+		row->y = row->b = box->b;
+
+		for (cell = row->down; cell; cell = cell->next)
+		{
+			float colw = row->w / ncol; // TODO: proper calculation
+
+			cell->em = fz_from_css_number(cell->style->font_size, row->em, row->em, row->em);
+			cell->y = cell->b = row->y;
+			cell->x = row->x + col * colw;
+			cell->w = colw;
+
+			for (child = cell->down; child; child = child->next)
+			{
+				if (child->type == BOX_BLOCK)
+					layout_block(ctx, child, cell->em, cell->x, &cell->b, cell->w, page_h, 0, hb_buf);
+				else if (child->type == BOX_FLOW)
+					layout_flow(ctx, child, cell, page_h, hb_buf);
+				cell->b = child->b;
+			}
+
+			if (cell->b > row->b)
+				row->b = cell->b;
+
+			++col;
+		}
+
+		box->b = row->b;
+	}
+}
+
+static float layout_block(fz_context *ctx, fz_html_box *box, float em, float top_x, float *top_b, float top_w,
+		float page_h, float vertical, hb_buffer_t *hb_buf)
+{
+	fz_html_box *child;
+	float auto_width;
+	int first;
+
+	const fz_css_style *style = box->style;
 	float *margin = box->margin;
 	float *border = box->border;
 	float *padding = box->padding;
 
-	em = box->em = fz_from_css_number(box->style.font_size, em, em);
+	assert(fz_html_box_has_boxes(box));
+	em = box->em = fz_from_css_number(style->font_size, em, em, em);
 
-	margin[0] = fz_from_css_number(box->style.margin[0], em, top->w);
-	margin[1] = fz_from_css_number(box->style.margin[1], em, top->w);
-	margin[2] = fz_from_css_number(box->style.margin[2], em, top->w);
-	margin[3] = fz_from_css_number(box->style.margin[3], em, top->w);
+	margin[0] = fz_from_css_number(style->margin[0], em, top_w, 0);
+	margin[1] = fz_from_css_number(style->margin[1], em, top_w, 0);
+	margin[2] = fz_from_css_number(style->margin[2], em, top_w, 0);
+	margin[3] = fz_from_css_number(style->margin[3], em, top_w, 0);
 
-	padding[0] = fz_from_css_number(box->style.padding[0], em, top->w);
-	padding[1] = fz_from_css_number(box->style.padding[1], em, top->w);
-	padding[2] = fz_from_css_number(box->style.padding[2], em, top->w);
-	padding[3] = fz_from_css_number(box->style.padding[3], em, top->w);
+	padding[0] = fz_from_css_number(style->padding[0], em, top_w, 0);
+	padding[1] = fz_from_css_number(style->padding[1], em, top_w, 0);
+	padding[2] = fz_from_css_number(style->padding[2], em, top_w, 0);
+	padding[3] = fz_from_css_number(style->padding[3], em, top_w, 0);
 
-	if (box->style.border_style)
-	{
-		border[0] = fz_from_css_number(box->style.border_width[0], em, top->w);
-		border[1] = fz_from_css_number(box->style.border_width[1], em, top->w);
-		border[2] = fz_from_css_number(box->style.border_width[2], em, top->w);
-		border[3] = fz_from_css_number(box->style.border_width[3], em, top->w);
-	}
-	else
-		border[0] = border[1] = border[2] = border[3] = 0;
+	border[0] = style->border_style_0 ? fz_from_css_number(style->border_width[0], em, top_w, 0) : 0;
+	border[1] = style->border_style_1 ? fz_from_css_number(style->border_width[1], em, top_w, 0) : 0;
+	border[2] = style->border_style_2 ? fz_from_css_number(style->border_width[2], em, top_w, 0) : 0;
+	border[3] = style->border_style_3 ? fz_from_css_number(style->border_width[3], em, top_w, 0) : 0;
 
-	if (padding[T] == 0 && border[T] == 0)
-		box_collapse_margin = margin[T];
-	else
-		box_collapse_margin = 0;
+	/* TODO: remove 'vertical' margin adjustments across automatic page breaks */
 
-	if (margin[T] > top_collapse_margin)
-		margin[T] -= top_collapse_margin;
+	if (layout_block_page_break(ctx, top_b, page_h, vertical, style->page_break_before))
+		vertical = 0;
+
+	box->x = top_x + margin[L] + border[L] + padding[L];
+	auto_width = top_w - (margin[L] + margin[R] + border[L] + border[R] + padding[L] + padding[R]);
+	box->w = fz_from_css_number(style->width, em, auto_width, auto_width);
+
+	if (margin[T] > vertical)
+		margin[T] -= vertical;
 	else
 		margin[T] = 0;
 
-	box->x = top->x + margin[L] + border[L] + padding[L];
-	box->y = top->y + top->h + margin[T] + border[T] + padding[T];
-	box->w = top->w - (margin[L] + margin[R] + border[L] + border[R] + padding[L] + padding[R]);
-	box->h = 0;
+	if (padding[T] == 0 && border[T] == 0)
+		vertical += margin[T];
+	else
+		vertical = 0;
 
-	prev_br = 0;
+	box->y = box->b = *top_b + margin[T] + border[T] + padding[T];
+
+	first = 1;
 	for (child = box->down; child; child = child->next)
 	{
 		if (child->type == BOX_BLOCK)
 		{
-			layout_block(ctx, child, box, em, box_collapse_margin, page_h);
-			box->h += child->h +
-				child->padding[T] + child->padding[B] +
-				child->border[T] + child->border[B] +
-				child->margin[T] + child->margin[B];
-			box_collapse_margin = child->margin[B];
-			prev_br = 0;
+			assert(fz_html_box_has_boxes(child));
+			vertical = layout_block(ctx, child, em, box->x, &box->b, box->w, page_h, vertical, hb_buf);
+			if (first)
+			{
+				/* move collapsed parent/child top margins to parent */
+				margin[T] += child->margin[T];
+				box->y += child->margin[T];
+				child->margin[T] = 0;
+				first = 0;
+			}
+			box->b = child->b + child->padding[B] + child->border[B] + child->margin[B];
+		}
+		else if (child->type == BOX_TABLE)
+		{
+			assert(fz_html_box_has_boxes(child));
+			layout_table(ctx, child, box, page_h, hb_buf);
+			first = 0;
+			box->b = child->b + child->padding[B] + child->border[B] + child->margin[B];
 		}
 		else if (child->type == BOX_BREAK)
 		{
-			/* TODO: interaction with page breaks */
-			if (prev_br)
-				box->h += fz_from_css_number_scale(box->style.line_height, em, em, em);
-			prev_br = 1;
+			box->b += fz_from_css_number_scale(style->line_height, em);
+			vertical = 0;
+			first = 0;
 		}
 		else if (child->type == BOX_FLOW)
 		{
-			layout_flow(ctx, child, box, em, page_h);
-			if (child->h > 0)
+			layout_flow(ctx, child, box, page_h, hb_buf);
+			if (child->b > child->y)
 			{
-				box->h += child->h;
-				box_collapse_margin = 0;
-				prev_br = 0;
+				box->b = child->b;
+				vertical = 0;
+				first = 0;
 			}
 		}
 	}
 
-	if (padding[B] == 0 && border[B] == 0)
+	/* reserve space for the list mark */
+	if (box->list_item && box->y == box->b)
 	{
-		if (margin[B] > 0)
-		{
-			box->h -= box_collapse_margin;
-			if (margin[B] < box_collapse_margin)
-				margin[B] = box_collapse_margin;
-		}
+		box->b += fz_from_css_number_scale(style->line_height, em);
+		vertical = 0;
 	}
+
+	if (layout_block_page_break(ctx, &box->b, page_h, 0, style->page_break_after))
+	{
+		vertical = 0;
+		margin[B] = 0;
+	}
+
+	if (box->y == box->b)
+	{
+		if (margin[B] > vertical)
+			margin[B] -= vertical;
+		else
+			margin[B] = 0;
+	}
+	else
+	{
+		box->b -= vertical;
+		vertical = fz_max(margin[B], vertical);
+		margin[B] = vertical;
+	}
+
+	return vertical;
 }
 
-static void draw_flow_box(fz_context *ctx, fz_html *box, float page_top, float page_bot, fz_device *dev, const fz_matrix *ctm)
+void
+fz_layout_html(fz_context *ctx, fz_html *html, float w, float h, float em)
+{
+	fz_html_box *box = html->root;
+	hb_buffer_t *hb_buf = NULL;
+	int unlocked = 0;
+
+	fz_var(hb_buf);
+	fz_var(unlocked);
+
+	/* If we're already laid out to the specifications we need,
+	 * nothing to do. */
+	if (html->layout_w == w && html->layout_h == h && html->layout_em == em)
+		return;
+
+	html->page_margin[T] = fz_from_css_number(html->root->style->margin[T], em, em, 0);
+	html->page_margin[B] = fz_from_css_number(html->root->style->margin[B], em, em, 0);
+	html->page_margin[L] = fz_from_css_number(html->root->style->margin[L], em, em, 0);
+	html->page_margin[R] = fz_from_css_number(html->root->style->margin[R], em, em, 0);
+
+	html->page_w = w - html->page_margin[L] - html->page_margin[R];
+	if (html->page_w <= 72)
+		html->page_w = 72; /* enforce a minimum page size! */
+	if (h > 0)
+	{
+		html->page_h = h - html->page_margin[T] - html->page_margin[B];
+		if (html->page_h <= 72)
+			html->page_h = 72; /* enforce a minimum page size! */
+	}
+	else
+	{
+		/* h 0 means no pagination */
+		html->page_h = 0;
+	}
+
+	fz_hb_lock(ctx);
+
+	fz_try(ctx)
+	{
+		Memento_startLeaking(); /* HarfBuzz leaks harmlessly */
+		hb_buf = hb_buffer_create();
+		Memento_stopLeaking(); /* HarfBuzz leaks harmlessly */
+		unlocked = 1;
+		fz_hb_unlock(ctx);
+
+		box->em = em;
+		box->w = html->page_w;
+		box->b = box->y;
+
+		if (box->down)
+		{
+			switch (box->down->type)
+			{
+			case BOX_BLOCK:
+				layout_block(ctx, box->down, box->em, box->x, &box->b, box->w, html->page_h, 0, hb_buf);
+				break;
+			case BOX_FLOW:
+				layout_flow(ctx, box->down, box, html->page_h, hb_buf);
+				break;
+			}
+			box->b = box->down->b;
+		}
+	}
+	fz_always(ctx)
+	{
+		if (unlocked)
+			fz_hb_lock(ctx);
+		hb_buffer_destroy(hb_buf);
+		fz_hb_unlock(ctx);
+	}
+	fz_catch(ctx)
+	{
+		fz_rethrow(ctx);
+	}
+
+	if (h == 0)
+		html->page_h = box->b;
+
+	/* Remember how we're laid out so we can avoid needless
+	 * relayouts in future. */
+	html->layout_w = w;
+	html->layout_h = h;
+	html->layout_em = em;
+
+#ifndef NDEBUG
+	if (fz_atoi(getenv("FZ_DEBUG_HTML")))
+		fz_debug_html(ctx, html->root);
+#endif
+}
+
+static void draw_flow_box(fz_context *ctx, fz_html_box *box, float page_top, float page_bot, fz_device *dev, fz_matrix ctm, hb_buffer_t *hb_buf)
 {
 	fz_html_flow *node;
 	fz_text *text;
 	fz_matrix trm;
-	const char *s;
 	float color[3];
-	float x, y;
-	int c, g;
+	float prev_color[3];
+
+	/* FIXME: HB_DIRECTION_TTB? */
+
+	text = NULL;
+	prev_color[0] = 0;
+	prev_color[1] = 0;
+	prev_color[2] = 0;
 
 	for (node = box->flow_head; node; node = node->next)
 	{
+		const fz_css_style *style = node->box->style;
+
 		if (node->type == FLOW_IMAGE)
 		{
 			if (node->y >= page_bot || node->y + node->h <= page_top)
@@ -716,41 +919,137 @@ static void draw_flow_box(fz_context *ctx, fz_html *box, float page_top, float p
 				continue;
 		}
 
-		if (node->type == FLOW_WORD)
+		if (node->type == FLOW_WORD || node->type == FLOW_SPACE || node->type == FLOW_SHYPHEN)
 		{
-			fz_scale(&trm, node->em, -node->em);
-			text = fz_new_text(ctx, node->style->font, &trm, 0);
+			string_walker walker;
+			const char *s;
+			float x, y;
 
-			x = node->x;
-			y = node->y;
-			s = node->text;
-			while (*s)
+			if (node->type == FLOW_SPACE && node->breaks_line)
+				continue;
+			if (node->type == FLOW_SHYPHEN && !node->breaks_line)
+				continue;
+			if (style->visibility != V_VISIBLE)
+				continue;
+
+			color[0] = style->color.r / 255.0f;
+			color[1] = style->color.g / 255.0f;
+			color[2] = style->color.b / 255.0f;
+
+			if (color[0] != prev_color[0] || color[1] != prev_color[1] || color[2] != prev_color[2])
 			{
-				s += fz_chartorune(&c, s);
-				g = fz_encode_character(ctx, node->style->font, c);
-				fz_add_text(ctx, text, g, c, x, y);
-				x += fz_advance_glyph(ctx, node->style->font, g) * node->em;
+				if (text)
+				{
+					fz_fill_text(ctx, dev, text, ctm, fz_device_rgb(ctx), prev_color, 1, fz_default_color_params);
+					fz_drop_text(ctx, text);
+					text = NULL;
+				}
+				prev_color[0] = color[0];
+				prev_color[1] = color[1];
+				prev_color[2] = color[2];
 			}
 
-			color[0] = node->style->color.r / 255.0f;
-			color[1] = node->style->color.g / 255.0f;
-			color[2] = node->style->color.b / 255.0f;
+			if (!text)
+				text = fz_new_text(ctx);
 
-			fz_fill_text(ctx, dev, text, ctm, fz_device_rgb(ctx), color, 1);
+			if (node->bidi_level & 1)
+				x = node->x + node->w;
+			else
+				x = node->x;
+			y = node->y;
 
-			fz_drop_text(ctx, text);
+			trm.a = node->box->em;
+			trm.b = 0;
+			trm.c = 0;
+			trm.d = -node->box->em;
+			trm.e = x;
+			trm.f = y - page_top;
+
+			s = get_node_text(ctx, node);
+			init_string_walker(ctx, &walker, hb_buf, node->bidi_level & 1, style->font, node->script, node->markup_lang, style->small_caps, s);
+			while (walk_string(&walker))
+			{
+				float node_scale = node->box->em / walker.scale;
+				unsigned int i;
+				uint32_t k;
+				int c, n;
+
+				/* Flatten advance and offset into offset array. */
+				int x_advance = 0;
+				int y_advance = 0;
+				for (i = 0; i < walker.glyph_count; ++i)
+				{
+					walker.glyph_pos[i].x_offset += x_advance;
+					walker.glyph_pos[i].y_offset += y_advance;
+					x_advance += walker.glyph_pos[i].x_advance;
+					y_advance += walker.glyph_pos[i].y_advance;
+				}
+
+				if (node->bidi_level & 1)
+					x -= x_advance * node_scale;
+
+				/* Walk characters to find glyph clusters */
+				k = 0;
+				while (walker.start + k < walker.end)
+				{
+					n = fz_chartorune(&c, walker.start + k);
+
+					for (i = 0; i < walker.glyph_count; ++i)
+					{
+						if (walker.glyph_info[i].cluster == k)
+						{
+							trm.e = x + walker.glyph_pos[i].x_offset * node_scale;
+							trm.f = y - walker.glyph_pos[i].y_offset * node_scale - page_top;
+							fz_show_glyph(ctx, text, walker.font, trm,
+									walker.glyph_info[i].codepoint, c,
+									0, node->bidi_level, box->markup_dir, node->markup_lang);
+							c = -1; /* for subsequent glyphs in x-to-many mappings */
+						}
+					}
+
+					/* no glyph found (many-to-many or many-to-one mapping) */
+					if (c != -1)
+					{
+						fz_show_glyph(ctx, text, walker.font, trm,
+								-1, c,
+								0, node->bidi_level, box->markup_dir, node->markup_lang);
+					}
+
+					k += n;
+				}
+
+				if ((node->bidi_level & 1) == 0)
+					x += x_advance * node_scale;
+
+				y += y_advance * node_scale;
+			}
 		}
 		else if (node->type == FLOW_IMAGE)
 		{
-			fz_matrix local_ctm = *ctm;
-			fz_pre_translate(&local_ctm, node->x, node->y);
-			fz_pre_scale(&local_ctm, node->w, node->h);
-			fz_fill_image(ctx, dev, node->image, &local_ctm, 1);
+			if (text)
+			{
+				fz_fill_text(ctx, dev, text, ctm, fz_device_rgb(ctx), color, 1, fz_default_color_params);
+				fz_drop_text(ctx, text);
+				text = NULL;
+			}
+			if (style->visibility == V_VISIBLE)
+			{
+				fz_matrix itm = fz_pre_translate(ctm, node->x, node->y - page_top);
+				itm = fz_pre_scale(itm, node->w, node->h);
+				fz_fill_image(ctx, dev, node->content.image, itm, 1, fz_default_color_params);
+			}
 		}
+	}
+
+	if (text)
+	{
+		fz_fill_text(ctx, dev, text, ctm, fz_device_rgb(ctx), color, 1, fz_default_color_params);
+		fz_drop_text(ctx, text);
+		text = NULL;
 	}
 }
 
-static void draw_rect(fz_context *ctx, fz_device *dev, const fz_matrix *ctm, fz_css_color color, float x0, float y0, float x1, float y1)
+static void draw_rect(fz_context *ctx, fz_device *dev, fz_matrix ctm, float page_top, fz_css_color color, float x0, float y0, float x1, float y1)
 {
 	if (color.a > 0)
 	{
@@ -758,17 +1057,17 @@ static void draw_rect(fz_context *ctx, fz_device *dev, const fz_matrix *ctm, fz_
 
 		fz_path *path = fz_new_path(ctx);
 
-		fz_moveto(ctx, path, x0, y0);
-		fz_lineto(ctx, path, x1, y0);
-		fz_lineto(ctx, path, x1, y1);
-		fz_lineto(ctx, path, x0, y1);
+		fz_moveto(ctx, path, x0, y0 - page_top);
+		fz_lineto(ctx, path, x1, y0 - page_top);
+		fz_lineto(ctx, path, x1, y1 - page_top);
+		fz_lineto(ctx, path, x0, y1 - page_top);
 		fz_closepath(ctx, path);
 
 		rgb[0] = color.r / 255.0f;
 		rgb[1] = color.g / 255.0f;
 		rgb[2] = color.b / 255.0f;
 
-		fz_fill_path(ctx, dev, path, 0, ctm, fz_device_rgb(ctx), rgb, color.a / 255.0f);
+		fz_fill_path(ctx, dev, path, 0, ctm, fz_device_rgb(ctx), rgb, color.a / 255.0f, fz_default_color_params);
 
 		fz_drop_path(ctx, path);
 	}
@@ -790,7 +1089,7 @@ static void format_roman_number(fz_context *ctx, char *buf, int size, int n, con
 {
 	int I = n % 10;
 	int X = (n / 10) % 10;
-	int C = (n / 100) % 100;
+	int C = (n / 100) % 10;
 	int M = (n / 1000);
 
 	fz_strlcpy(buf, "", size);
@@ -835,9 +1134,9 @@ static void format_list_number(fz_context *ctx, int type, int x, char *buf, int 
 	switch (type)
 	{
 	case LST_NONE: fz_strlcpy(buf, "", size); break;
-	case LST_DISC: fz_strlcpy(buf, "\342\227\217  ", size); break; /* U+25CF BLACK CIRCLE */
-	case LST_CIRCLE: fz_strlcpy(buf, "\342\227\213  ", size); break; /* U+25CB WHITE CIRCLE */
-	case LST_SQUARE: fz_strlcpy(buf, "\342\226\240  ", size); break; /* U+25A0 BLACK SQUARE */
+	case LST_DISC: fz_snprintf(buf, size, "%C  ", 0x2022); break; /* U+2022 BULLET */
+	case LST_CIRCLE: fz_snprintf(buf, size, "%C  ", 0x25CB); break; /* U+25CB WHITE CIRCLE */
+	case LST_SQUARE: fz_snprintf(buf, size, "%C  ", 0x25A0); break; /* U+25A0 BLACK SQUARE */
 	default:
 	case LST_DECIMAL: fz_snprintf(buf, size, "%d. ", x); break;
 	case LST_DECIMAL_ZERO: fz_snprintf(buf, size, "%02d. ", x); break;
@@ -852,218 +1151,181 @@ static void format_list_number(fz_context *ctx, int type, int x, char *buf, int 
 	}
 }
 
-static void draw_list_mark(fz_context *ctx, fz_html *box, float page_top, float page_bot, fz_device *dev, const fz_matrix *ctm, int n)
+static fz_html_flow *find_list_mark_anchor(fz_context *ctx, fz_html_box *box)
 {
+	/* find first flow node in <li> tag */
+	while (box)
+	{
+		if (box->type == BOX_FLOW)
+			return box->flow_head;
+		box = box->down;
+	}
+	return NULL;
+}
+
+static void draw_list_mark(fz_context *ctx, fz_html_box *box, float page_top, float page_bot, fz_device *dev, fz_matrix ctm, int n)
+{
+	fz_font *font;
 	fz_text *text;
 	fz_matrix trm;
-	float x, y, w, baseline;
+	fz_html_flow *line;
+	float y, w;
 	float color[3];
 	const char *s;
 	char buf[40];
 	int c, g;
 
-	fz_scale(&trm, box->em, -box->em);
-	text = fz_new_text(ctx, box->style.font, &trm, 0);
-	baseline = box->em * 0.8 + (box->h - box->em) / 2;
+	trm = fz_scale(box->em, -box->em);
 
-	if (box->y + baseline > page_bot || box->y + baseline < page_top)
+	line = find_list_mark_anchor(ctx, box);
+	if (line)
+	{
+		y = line->y;
+	}
+	else
+	{
+		float h = fz_from_css_number_scale(box->style->line_height, box->em);
+		float a = box->em * 0.8f;
+		float d = box->em * 0.2f;
+		if (a + d > h)
+			h = a + d;
+		y = box->y + a + (h - a - d) / 2;
+	}
+
+	if (y > page_bot || y < page_top)
 		return;
 
-	format_list_number(ctx, box->style.list_style_type, n, buf, sizeof buf);
+	format_list_number(ctx, box->style->list_style_type, n, buf, sizeof buf);
 
 	s = buf;
 	w = 0;
 	while (*s)
 	{
 		s += fz_chartorune(&c, s);
-		g = fz_encode_character(ctx, box->style.font, c);
-		w += fz_advance_glyph(ctx, box->style.font, g) * box->em;
+		g = fz_encode_character_with_fallback(ctx, box->style->font, c, UCDN_SCRIPT_LATIN, FZ_LANG_UNSET, &font);
+		w += fz_advance_glyph(ctx, font, g, 0) * box->em;
 	}
 
-	s = buf;
-	x = box->x - box->padding[L] - box->border[L] - box->margin[L] - w;
-	y = box->y + baseline;
-	while (*s)
+	text = fz_new_text(ctx);
+
+	fz_try(ctx)
 	{
-		s += fz_chartorune(&c, s);
-		g = fz_encode_character(ctx, box->style.font, c);
-		fz_add_text(ctx, text, g, c, x, y);
-		x += fz_advance_glyph(ctx, box->style.font, g) * box->em;
+		s = buf;
+		trm.e = box->x - w;
+		trm.f = y - page_top;
+		while (*s)
+		{
+			s += fz_chartorune(&c, s);
+			g = fz_encode_character_with_fallback(ctx, box->style->font, c, UCDN_SCRIPT_LATIN, FZ_LANG_UNSET, &font);
+			fz_show_glyph(ctx, text, font, trm, g, c, 0, 0, FZ_BIDI_NEUTRAL, FZ_LANG_UNSET);
+			trm.e += fz_advance_glyph(ctx, font, g, 0) * box->em;
+		}
+
+		color[0] = box->style->color.r / 255.0f;
+		color[1] = box->style->color.g / 255.0f;
+		color[2] = box->style->color.b / 255.0f;
+
+		fz_fill_text(ctx, dev, text, ctm, fz_device_rgb(ctx), color, 1, fz_default_color_params);
 	}
-
-	color[0] = box->style.color.r / 255.0f;
-	color[1] = box->style.color.g / 255.0f;
-	color[2] = box->style.color.b / 255.0f;
-
-	fz_fill_text(ctx, dev, text, ctm, fz_device_rgb(ctx), color, 1);
-
-	fz_drop_text(ctx, text);
+	fz_always(ctx)
+		fz_drop_text(ctx, text);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
 }
 
-static void draw_block_box(fz_context *ctx, fz_html *box, float page_top, float page_bot, fz_device *dev, const fz_matrix *ctm)
+static void draw_block_box(fz_context *ctx, fz_html_box *box, float page_top, float page_bot, fz_device *dev, fz_matrix ctm, hb_buffer_t *hb_buf);
+
+static void draw_box(fz_context *ctx, fz_html_box *box, float page_top, float page_bot, fz_device *dev, fz_matrix ctm, hb_buffer_t *hb_buf)
+{
+	switch (box->type)
+	{
+	case BOX_TABLE:
+	case BOX_TABLE_ROW:
+	case BOX_TABLE_CELL:
+	case BOX_BLOCK:
+		draw_block_box(ctx, box, page_top, page_bot, dev, ctm, hb_buf);
+		break;
+	case BOX_FLOW:
+		draw_flow_box(ctx, box, page_top, page_bot, dev, ctm, hb_buf);
+		break;
+	}
+}
+
+static void draw_block_box(fz_context *ctx, fz_html_box *box, float page_top, float page_bot, fz_device *dev, fz_matrix ctm, hb_buffer_t *hb_buf)
 {
 	float x0, y0, x1, y1;
 
 	float *border = box->border;
 	float *padding = box->padding;
 
+	assert(fz_html_box_has_boxes(box));
 	x0 = box->x - padding[L];
 	y0 = box->y - padding[T];
 	x1 = box->x + box->w + padding[R];
-	y1 = box->y + box->h + padding[B];
+	y1 = box->b + padding[B];
 
 	if (y0 > page_bot || y1 < page_top)
 		return;
 
-	draw_rect(ctx, dev, ctm, box->style.background_color, x0, y0, x1, y1);
-
-	if (border[T] > 0)
-		draw_rect(ctx, dev, ctm, box->style.border_color[T], x0 - border[L], y0 - border[T], x1 + border[R], y0);
-	if (border[B] > 0)
-		draw_rect(ctx, dev, ctm, box->style.border_color[B], x0 - border[L], y1, x1 + border[R], y1 + border[B]);
-	if (border[L] > 0)
-		draw_rect(ctx, dev, ctm, box->style.border_color[L], x0 - border[L], y0 - border[T], x0, y1 + border[B]);
-	if (border[R] > 0)
-		draw_rect(ctx, dev, ctm, box->style.border_color[R], x1, y0 - border[T], x1 + border[R], y1 + border[B]);
-
-	if (box->list_item)
+	if (box->style->visibility == V_VISIBLE)
 	{
-		draw_list_mark(ctx, box, page_top, page_bot, dev, ctm, box->list_item);
+		draw_rect(ctx, dev, ctm, page_top, box->style->background_color, x0, y0, x1, y1);
+
+		if (border[T] > 0)
+			draw_rect(ctx, dev, ctm, page_top, box->style->border_color[T], x0 - border[L], y0 - border[T], x1 + border[R], y0);
+		if (border[B] > 0)
+			draw_rect(ctx, dev, ctm, page_top, box->style->border_color[B], x0 - border[L], y1, x1 + border[R], y1 + border[B]);
+		if (border[L] > 0)
+			draw_rect(ctx, dev, ctm, page_top, box->style->border_color[L], x0 - border[L], y0 - border[T], x0, y1 + border[B]);
+		if (border[R] > 0)
+			draw_rect(ctx, dev, ctm, page_top, box->style->border_color[R], x1, y0 - border[T], x1 + border[R], y1 + border[B]);
+
+		if (box->list_item)
+			draw_list_mark(ctx, box, page_top, page_bot, dev, ctm, box->list_item);
 	}
 
 	for (box = box->down; box; box = box->next)
-	{
-		switch (box->type)
-		{
-		case BOX_BLOCK: draw_block_box(ctx, box, page_top, page_bot, dev, ctm); break;
-		case BOX_FLOW: draw_flow_box(ctx, box, page_top, page_bot, dev, ctm); break;
-		}
-	}
+		draw_box(ctx, box, page_top, page_bot, dev, ctm, hb_buf);
 }
 
 void
-fz_draw_html(fz_context *ctx, fz_html *box, float page_top, float page_bot, fz_device *dev, const fz_matrix *inctm)
+fz_draw_html(fz_context *ctx, fz_device *dev, fz_matrix ctm, fz_html *html, int page)
 {
-	fz_matrix ctm = *inctm;
-	fz_pre_translate(&ctm, 0, -page_top);
-	draw_block_box(ctx, box, page_top, page_bot, dev, &ctm);
-}
+	hb_buffer_t *hb_buf = NULL;
+	fz_html_box *box;
+	int unlocked = 0;
+	float page_top = page * html->page_h;
+	float page_bot = (page + 1) * html->page_h;
 
-static char *concat_text(fz_context *ctx, fz_xml *root)
-{
-	fz_xml  *node;
-	int i = 0, n = 1;
-	char *s;
-	for (node = fz_xml_down(root); node; node = fz_xml_next(node))
+	fz_var(hb_buf);
+	fz_var(unlocked);
+
+	draw_rect(ctx, dev, ctm, 0, html->root->style->background_color,
+			0, 0,
+			html->page_w + html->page_margin[L] + html->page_margin[R],
+			html->page_h + html->page_margin[T] + html->page_margin[B]);
+
+	ctm = fz_pre_translate(ctm, html->page_margin[L], html->page_margin[T]);
+
+	fz_hb_lock(ctx);
+	fz_try(ctx)
 	{
-		const char *text = fz_xml_text(node);
-		n += text ? strlen(text) : 0;
+		hb_buf = hb_buffer_create();
+		fz_hb_unlock(ctx);
+		unlocked = 1;
+
+		for (box = html->root->down; box; box = box->next)
+			draw_box(ctx, html->root, page_top, page_bot, dev, ctm, hb_buf);
 	}
-	s = fz_malloc(ctx, n);
-	for (node = fz_xml_down(root); node; node = fz_xml_next(node))
+	fz_always(ctx)
 	{
-		const char *text = fz_xml_text(node);
-		if (text)
-		{
-			n = strlen(text);
-			memcpy(s+i, text, n);
-			i += n;
-		}
+		if (unlocked)
+			fz_hb_lock(ctx);
+		hb_buffer_destroy(hb_buf);
+		fz_hb_unlock(ctx);
 	}
-	s[i] = 0;
-	return s;
-}
-
-static fz_css_rule *
-html_load_css(fz_context *ctx, fz_archive *zip, const char *base_uri, fz_css_rule *css, fz_xml *root)
-{
-	fz_xml *node;
-	fz_buffer *buf;
-	char path[2048];
-
-	for (node = root; node; node = fz_xml_next(node))
+	fz_catch(ctx)
 	{
-		const char *tag = fz_xml_tag(node);
-		if (tag && !strcmp(tag, "link"))
-		{
-			char *rel = fz_xml_att(node, "rel");
-			if (rel && !fz_strcasecmp(rel, "stylesheet"))
-			{
-				char *type = fz_xml_att(node, "type");
-				if ((type && !strcmp(type, "text/css")) || !type)
-				{
-					char *href = fz_xml_att(node, "href");
-					if (href)
-					{
-						fz_strlcpy(path, base_uri, sizeof path);
-						fz_strlcat(path, "/", sizeof path);
-						fz_strlcat(path, href, sizeof path);
-						fz_cleanname(path);
-
-						buf = fz_read_archive_entry(ctx, zip, path);
-						fz_write_buffer_byte(ctx, buf, 0);
-						fz_try(ctx)
-							css = fz_parse_css(ctx, css, (char*)buf->data, path);
-						fz_catch(ctx)
-							fz_warn(ctx, "ignoring stylesheet %s", path);
-						fz_drop_buffer(ctx, buf);
-					}
-				}
-			}
-		}
-		if (tag && !strcmp(tag, "style"))
-		{
-			char *s = concat_text(ctx, node);
-			fz_try(ctx)
-				css = fz_parse_css(ctx, css, s, "<style>");
-			fz_catch(ctx)
-				fz_warn(ctx, "ignoring inline stylesheet");
-			fz_free(ctx, s);
-		}
-		if (fz_xml_down(node))
-			css = html_load_css(ctx, zip, base_uri, css, fz_xml_down(node));
+		fz_rethrow(ctx);
 	}
-	return css;
-}
-
-void
-fz_layout_html(fz_context *ctx, fz_html *box, float w, float h, float em)
-{
-	fz_html page_box;
-
-	init_box(ctx, &page_box);
-	page_box.w = w;
-	page_box.h = 0;
-
-	layout_block(ctx, box, &page_box, em, 0, h);
-}
-
-fz_html *
-fz_parse_html(fz_context *ctx, fz_html_font_set *set, fz_archive *zip, const char *base_uri, fz_buffer *buf, const char *user_css)
-{
-	fz_xml *xml;
-	fz_css_rule *css;
-	fz_css_match match;
-	fz_html *box;
-
-	xml = fz_parse_xml(ctx, buf->data, buf->len, 1);
-
-	css = fz_parse_css(ctx, NULL, default_css, "<default>");
-	if (user_css)
-		css = fz_parse_css(ctx, NULL, user_css, "<user>");
-	css = html_load_css(ctx, zip, base_uri, css, xml);
-
-	// print_rules(css);
-
-	box = new_box(ctx);
-
-	match.up = NULL;
-	match.count = 0;
-
-	generate_boxes(ctx, set, zip, base_uri, xml, box, css, &match, 0);
-
-	fz_drop_css(ctx, css);
-	fz_drop_xml(ctx, xml);
-
-	return box;
 }

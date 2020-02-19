@@ -1,10 +1,15 @@
-#include "mupdf/html.h"
+#include "mupdf/fitz.h"
+#include "html-imp.h"
+
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <assert.h>
 
 static const char *inherit_list[] = {
 	"color",
 	"direction",
 	"font-family",
-	"font-size",
 	"font-style",
 	"font-variant",
 	"font-weight",
@@ -107,6 +112,18 @@ keyword_in_list(const char *name, const char **list, int n)
 	return 0;
 }
 
+static int
+is_bold_from_font_weight(const char *weight)
+{
+	return !strcmp(weight, "bold") || !strcmp(weight, "bolder") || atoi(weight) > 400;
+}
+
+static int
+is_italic_from_font_style(const char *style)
+{
+	return !strcmp(style, "italic") || !strcmp(style, "oblique");
+}
+
 /*
  * Compute specificity
  */
@@ -190,15 +207,15 @@ count_selector_names(fz_css_selector *sel)
 	return n;
 }
 
-#define INLINE_SPECIFICITY 1000
+#define INLINE_SPECIFICITY 10000
 
 static int
-selector_specificity(fz_css_selector *sel)
+selector_specificity(fz_css_selector *sel, int important)
 {
 	int b = count_selector_ids(sel);
 	int c = count_selector_atts(sel);
 	int d = count_selector_names(sel);
-	return b * 100 + c * 10 + d;
+	return important * 1000 + b * 100 + c * 10 + d;
 }
 
 /*
@@ -206,27 +223,35 @@ selector_specificity(fz_css_selector *sel)
  */
 
 static int
-match_id_condition(fz_xml *node, const char *p)
+match_att_exists_condition(fz_xml *node, const char *key)
 {
-	const char *s = fz_xml_att(node, "id");
-	if (s && !strcmp(s, p))
-		return 1;
-	return 0;
+	const char *s = fz_xml_att(node, key);
+	return s != NULL;
 }
 
 static int
-match_class_condition(fz_xml *node, const char *p)
+match_att_is_condition(fz_xml *node, const char *key, const char *val)
 {
-	const char *s = fz_xml_att(node, "class");
-	char buf[1024];
-	if (s) {
-		strcpy(buf, s);
-		s = strtok(buf, " ");
-		while (s) {
-			if (!strcmp(s, p))
-				return 1;
-			s = strtok(NULL, " ");
-		}
+	const char *att = fz_xml_att(node, key);
+	return att && !strcmp(val, att);
+}
+
+static int
+match_att_has_condition(fz_xml *node, const char *att, const char *needle)
+{
+	const char *haystack = fz_xml_att(node, att);
+	const char *ss;
+	size_t n;
+	if (haystack) {
+		/* Try matching whole property first. */
+		if (!strcmp(haystack, needle))
+			return 1;
+
+		/* Look for matching words. */
+		n = strlen(needle);
+		ss = strstr(haystack, needle);
+		if (ss && (ss[n] == ' ' || ss[n] == 0) && (ss == haystack || ss[-1] == ' '))
+			return 1;
 	}
 	return 0;
 }
@@ -240,8 +265,12 @@ match_condition(fz_css_condition *cond, fz_xml *node)
 	switch (cond->type) {
 	default: return 0;
 	case ':': return 0; /* don't support pseudo-classes */
-	case '#': if (!match_id_condition(node, cond->val)) return 0; break;
-	case '.': if (!match_class_condition(node, cond->val)) return 0; break;
+	case '#': if (!match_att_is_condition(node, "id", cond->val)) return 0; break;
+	case '.': if (!match_att_has_condition(node, "class", cond->val)) return 0; break;
+	case '[': if (!match_att_exists_condition(node, cond->key)) return 0; break;
+	case '=': if (!match_att_is_condition(node, cond->key, cond->val)) return 0; break;
+	case '~': if (!match_att_has_condition(node, cond->key, cond->val)) return 0; break;
+	case '|': if (!match_att_is_condition(node, cond->key, cond->val)) return 0; break;
 	}
 
 	return match_condition(cond->next, node);
@@ -300,7 +329,7 @@ match_selector(fz_css_selector *sel, fz_xml *node)
 
 	if (sel->name)
 	{
-		if (strcmp(sel->name, fz_xml_tag(node)))
+		if (!fz_xml_is_tag(node, sel->name))
 			return 0;
 	}
 
@@ -400,21 +429,21 @@ static void
 add_shorthand_border_width(fz_css_match *match, fz_css_value *value, int spec)
 {
 	add_shorthand_trbl(match, value, spec,
-		"border-width-top", "border-width-right", "border-width-bottom", "border-width-left");
+		"border-top-width", "border-right-width", "border-bottom-width", "border-left-width");
 }
 
 static void
 add_shorthand_border_color(fz_css_match *match, fz_css_value *value, int spec)
 {
 	add_shorthand_trbl(match, value, spec,
-		"border-color-top", "border-color-right", "border-color-bottom", "border-color-left");
+		"border-top-color", "border-right-color", "border-bottom-color", "border-left-color");
 }
 
 static void
 add_shorthand_border_style(fz_css_match *match, fz_css_value *value, int spec)
 {
 	add_shorthand_trbl(match, value, spec,
-		"border-style-top", "border-style-right", "border-style-bottom", "border-style-left");
+		"border-top-style", "border-right-style", "border-bottom-style", "border-left-style");
 }
 
 static void
@@ -422,43 +451,43 @@ add_shorthand_border(fz_css_match *match, fz_css_value *value, int spec, int T, 
 {
 	while (value)
 	{
-		if (value->type == CSS_COLOR)
+		if (value->type == CSS_HASH)
 		{
-			if (T) add_property(match, "border-color-top", value, spec);
-			if (R) add_property(match, "border-color-right", value, spec);
-			if (B) add_property(match, "border-color-bottom", value, spec);
-			if (L) add_property(match, "border-color-left", value, spec);
+			if (T) add_property(match, "border-top-color", value, spec);
+			if (R) add_property(match, "border-right-color", value, spec);
+			if (B) add_property(match, "border-bottom-color", value, spec);
+			if (L) add_property(match, "border-left-color", value, spec);
 		}
 		else if (value->type == CSS_KEYWORD)
 		{
 			if (keyword_in_list(value->data, border_width_kw, nelem(border_width_kw)))
 			{
-				if (T) add_property(match, "border-width-top", value, spec);
-				if (R) add_property(match, "border-width-right", value, spec);
-				if (B) add_property(match, "border-width-bottom", value, spec);
-				if (L) add_property(match, "border-width-left", value, spec);
+				if (T) add_property(match, "border-top-width", value, spec);
+				if (R) add_property(match, "border-right-width", value, spec);
+				if (B) add_property(match, "border-bottom-width", value, spec);
+				if (L) add_property(match, "border-left-width", value, spec);
 			}
 			else if (keyword_in_list(value->data, border_style_kw, nelem(border_style_kw)))
 			{
-				if (T) add_property(match, "border-style-top", value, spec);
-				if (R) add_property(match, "border-style-right", value, spec);
-				if (B) add_property(match, "border-style-bottom", value, spec);
-				if (L) add_property(match, "border-style-left", value, spec);
+				if (T) add_property(match, "border-top-style", value, spec);
+				if (R) add_property(match, "border-right-style", value, spec);
+				if (B) add_property(match, "border-bottom-style", value, spec);
+				if (L) add_property(match, "border-left-style", value, spec);
 			}
 			else if (keyword_in_list(value->data, color_kw, nelem(color_kw)))
 			{
-				if (T) add_property(match, "border-color-top", value, spec);
-				if (R) add_property(match, "border-color-right", value, spec);
-				if (B) add_property(match, "border-color-bottom", value, spec);
-				if (L) add_property(match, "border-color-left", value, spec);
+				if (T) add_property(match, "border-top-color", value, spec);
+				if (R) add_property(match, "border-right-color", value, spec);
+				if (B) add_property(match, "border-bottom-color", value, spec);
+				if (L) add_property(match, "border-left-color", value, spec);
 			}
 		}
 		else
 		{
-			if (T) add_property(match, "border-width-top", value, spec);
-			if (R) add_property(match, "border-width-right", value, spec);
-			if (B) add_property(match, "border-width-bottom", value, spec);
-			if (L) add_property(match, "border-width-left", value, spec);
+			if (T) add_property(match, "border-top-width", value, spec);
+			if (R) add_property(match, "border-right-width", value, spec);
+			if (B) add_property(match, "border-bottom-width", value, spec);
+			if (L) add_property(match, "border-left-width", value, spec);
 		}
 		value = value->next;
 	}
@@ -565,7 +594,7 @@ add_property(fz_css_match *match, const char *name, fz_css_value *value, int spe
 		}
 	}
 
-	if (match->count + 1 >= nelem(match->prop))
+	if (match->count + 1 >= (int)nelem(match->prop))
 	{
 		// fz_warn(ctx, "too many css properties");
 		return;
@@ -577,15 +606,36 @@ add_property(fz_css_match *match, const char *name, fz_css_value *value, int spe
 	++match->count;
 }
 
+static void
+sort_properties(fz_css_match *match)
+{
+	int count = match->count;
+	fz_css_match_prop *prop = match->prop;
+	int i, k;
+
+	/* Insertion sort. */
+	for (i = 1; i < count; ++i)
+	{
+		k = i;
+		while (k > 0 && strcmp(prop[k-1].name, prop[k].name) > 0)
+		{
+			fz_css_match_prop save = prop[k-1];
+			prop[k-1] = prop[k];
+			prop[k] = save;
+			--k;
+		}
+	}
+}
+
 void
-fz_match_css(fz_context *ctx, fz_css_match *match, fz_css_rule *css, fz_xml *node)
+fz_match_css(fz_context *ctx, fz_css_match *match, fz_css *css, fz_xml *node)
 {
 	fz_css_rule *rule;
 	fz_css_selector *sel;
-	fz_css_property *prop, *head, *tail;
+	fz_css_property *prop;
 	const char *s;
 
-	for (rule = css; rule; rule = rule->next)
+	for (rule = css->rule; rule; rule = rule->next)
 	{
 		sel = rule->selector;
 		while (sel)
@@ -593,36 +643,174 @@ fz_match_css(fz_context *ctx, fz_css_match *match, fz_css_rule *css, fz_xml *nod
 			if (match_selector(sel, node))
 			{
 				for (prop = rule->declaration; prop; prop = prop->next)
-					add_property(match, prop->name, prop->value, selector_specificity(sel));
+					add_property(match, prop->name, prop->value, selector_specificity(sel, prop->important));
 				break;
 			}
 			sel = sel->next;
 		}
 	}
 
-	s = fz_xml_att(node, "style");
-	if (s)
+	if (fz_use_document_css(ctx))
 	{
-		head = tail = prop = fz_parse_css_properties(ctx, s);
-		while (prop)
+		s = fz_xml_att(node, "style");
+		if (s)
 		{
-			add_property(match, prop->name, prop->value, INLINE_SPECIFICITY);
-			tail = prop;
-			prop = prop->next;
+			fz_try(ctx)
+			{
+				prop = fz_parse_css_properties(ctx, css->pool, s);
+				while (prop)
+				{
+					add_property(match, prop->name, prop->value, INLINE_SPECIFICITY);
+					prop = prop->next;
+				}
+				/* We can "leak" the property here, since it is freed along with the pool allocator. */
+			}
+			fz_catch(ctx)
+			{
+				fz_warn(ctx, "ignoring style attribute");
+			}
 		}
-		if (tail)
-			tail->next = css->garbage;
-		css->garbage = head;
+	}
+
+	sort_properties(match); /* speed up subsequent value_from_raw_property lookups */
+}
+
+void
+fz_match_css_at_page(fz_context *ctx, fz_css_match *match, fz_css *css)
+{
+	fz_css_rule *rule;
+	fz_css_selector *sel;
+	fz_css_property *prop;
+
+	for (rule = css->rule; rule; rule = rule->next)
+	{
+		sel = rule->selector;
+		while (sel)
+		{
+			if (sel->name && !strcmp(sel->name, "@page"))
+			{
+				for (prop = rule->declaration; prop; prop = prop->next)
+					add_property(match, prop->name, prop->value, selector_specificity(sel, prop->important));
+				break;
+			}
+			sel = sel->next;
+		}
+	}
+
+	sort_properties(match); /* speed up subsequent value_from_raw_property lookups */
+}
+
+void
+fz_add_css_font_face(fz_context *ctx, fz_html_font_set *set, fz_archive *zip, const char *base_uri, fz_css_property *declaration)
+{
+	fz_html_font_face *custom;
+	fz_css_property *prop;
+	fz_font *font = NULL;
+	fz_buffer *buf = NULL;
+	int is_bold, is_italic, is_small_caps;
+	char path[2048];
+
+	const char *family = "serif";
+	const char *weight = "normal";
+	const char *style = "normal";
+	const char *variant = "normal";
+	const char *src = NULL;
+
+	for (prop = declaration; prop; prop = prop->next)
+	{
+		if (!strcmp(prop->name, "font-family")) family = prop->value->data;
+		if (!strcmp(prop->name, "font-weight")) weight = prop->value->data;
+		if (!strcmp(prop->name, "font-style")) style = prop->value->data;
+		if (!strcmp(prop->name, "font-variant")) variant = prop->value->data;
+		if (!strcmp(prop->name, "src")) src = prop->value->data;
+	}
+
+	if (!src)
+		return;
+
+	is_bold = is_bold_from_font_weight(weight);
+	is_italic = is_italic_from_font_style(style);
+	is_small_caps = !strcmp(variant, "small-caps");
+
+	fz_strlcpy(path, base_uri, sizeof path);
+	fz_strlcat(path, "/", sizeof path);
+	fz_strlcat(path, src, sizeof path);
+	fz_urldecode(path);
+	fz_cleanname(path);
+
+	for (custom = set->custom; custom; custom = custom->next)
+		if (!strcmp(custom->src, path) && !strcmp(custom->family, family) &&
+				custom->is_bold == is_bold &&
+				custom->is_italic == is_italic &&
+				custom->is_small_caps == is_small_caps)
+			return; /* already loaded */
+
+	fz_var(buf);
+	fz_var(font);
+
+	fz_try(ctx)
+	{
+		if (fz_has_archive_entry(ctx, zip, path))
+			buf = fz_read_archive_entry(ctx, zip, path);
+		else
+			buf = fz_read_file(ctx, src);
+		font = fz_new_font_from_buffer(ctx, NULL, buf, 0, 0);
+		fz_add_html_font_face(ctx, set, family, is_bold, is_italic, is_small_caps, path, font);
+	}
+	fz_always(ctx)
+	{
+		fz_drop_buffer(ctx, buf);
+		fz_drop_font(ctx, font);
+	}
+	fz_catch(ctx)
+	{
+		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+		fz_warn(ctx, "cannot load font-face: %s", src);
+	}
+}
+
+void
+fz_add_css_font_faces(fz_context *ctx, fz_html_font_set *set, fz_archive *zip, const char *base_uri, fz_css *css)
+{
+	fz_css_rule *rule;
+	fz_css_selector *sel;
+
+	for (rule = css->rule; rule; rule = rule->next)
+	{
+		if (!rule->loaded)
+		{
+			rule->loaded = 1;
+			sel = rule->selector;
+			while (sel)
+			{
+				if (sel->name && !strcmp(sel->name, "@font-face"))
+				{
+					fz_add_css_font_face(ctx, set, zip, base_uri, rule->declaration);
+					break;
+				}
+				sel = sel->next;
+			}
+		}
 	}
 }
 
 static fz_css_value *
 value_from_raw_property(fz_css_match *match, const char *name)
 {
-	int i;
-	for (i = 0; i < match->count; ++i)
-		if (!strcmp(match->prop[i].name, name))
-			return match->prop[i].value;
+	fz_css_match_prop *prop = match->prop;
+	int l = 0;
+	int r = match->count - 1;
+	while (l <= r)
+	{
+		int m = (l + r) >> 1;
+		int c = strcmp(name, prop[m].name);
+		if (c < 0)
+			r = m - 1;
+		else if (c > 0)
+			l = m + 1;
+		else
+			return prop[m].value;
+	}
 	return NULL;
 }
 
@@ -635,7 +823,8 @@ value_from_property(fz_css_match *match, const char *name)
 	if (match->up)
 	{
 		if (value && !strcmp(value->data, "inherit"))
-			return value_from_property(match->up, name);
+			if (strcmp(name, "font-size") != 0) /* never inherit 'font-size' textually */
+				return value_from_property(match->up, name);
 		if (!value && keyword_in_list(name, inherit_list, nelem(inherit_list)))
 			return value_from_property(match->up, name);
 	}
@@ -661,6 +850,45 @@ make_number(float v, int u)
 	return n;
 }
 
+/* Fast but inaccurate strtof. */
+static float
+fz_css_strtof(char *s, char **endptr)
+{
+	float sign = 1;
+	float v = 0;
+	float n = 0;
+	float d = 1;
+
+	if (*s == '-')
+	{
+		sign = -1;
+		++s;
+	}
+
+	while (*s >= '0' && *s <= '9')
+	{
+		v = v * 10 + (*s - '0');
+		++s;
+	}
+
+	if (*s == '.')
+	{
+		++s;
+		while (*s >= '0' && *s <= '9')
+		{
+			n = n * 10 + (*s - '0');
+			d = d * 10;
+			++s;
+		}
+		v += n / d;
+	}
+
+	if (endptr)
+		*endptr = s;
+
+	return sign * v;
+}
+
 static fz_css_number
 number_from_value(fz_css_value *value, float initial, int initial_unit)
 {
@@ -670,35 +898,49 @@ number_from_value(fz_css_value *value, float initial, int initial_unit)
 		return make_number(initial, initial_unit);
 
 	if (value->type == CSS_PERCENT)
-		return make_number((float)fz_strtod(value->data, NULL), N_PERCENT);
+		return make_number(fz_css_strtof(value->data, NULL), N_PERCENT);
 
 	if (value->type == CSS_NUMBER)
-		return make_number((float)fz_strtod(value->data, NULL), N_NUMBER);
+		return make_number(fz_css_strtof(value->data, NULL), N_NUMBER);
 
 	if (value->type == CSS_LENGTH)
 	{
-		float x = (float)fz_strtod(value->data, &p);
+		float x = fz_css_strtof(value->data, &p);
 
-		if (p[0] == 'e' && p[1] == 'm')
+		if (p[0] == 'e' && p[1] == 'm' && p[2] == 0)
 			return make_number(x, N_SCALE);
-		if (p[0] == 'e' && p[1] == 'x')
+		if (p[0] == 'e' && p[1] == 'x' && p[2] == 0)
 			return make_number(x / 2, N_SCALE);
 
-		if (p[0] == 'i' && p[1] == 'n')
-			return make_number(x * 72, N_NUMBER);
-		if (p[0] == 'c' && p[1] == 'm')
-			return make_number(x * 7200 / 254, N_NUMBER);
-		if (p[0] == 'm' && p[1] == 'm')
-			return make_number(x * 720 / 254, N_NUMBER);
-		if (p[0] == 'p' && p[1] == 'c')
-			return make_number(x * 12, N_NUMBER);
+		if (p[0] == 'i' && p[1] == 'n' && p[2] == 0)
+			return make_number(x * 72, N_LENGTH);
+		if (p[0] == 'c' && p[1] == 'm' && p[2] == 0)
+			return make_number(x * 7200 / 254, N_LENGTH);
+		if (p[0] == 'm' && p[1] == 'm' && p[2] == 0)
+			return make_number(x * 720 / 254, N_LENGTH);
+		if (p[0] == 'p' && p[1] == 'c' && p[2] == 0)
+			return make_number(x * 12, N_LENGTH);
 
-		if (p[0] == 'p' && p[1] == 't')
-			return make_number(x, N_NUMBER);
-		if (p[0] == 'p' && p[1] == 'x')
-			return make_number(x, N_NUMBER);
+		if (p[0] == 'p' && p[1] == 't' && p[2] == 0)
+			return make_number(x, N_LENGTH);
+		if (p[0] == 'p' && p[1] == 'x' && p[2] == 0)
+			return make_number(x, N_LENGTH);
 
-		return make_number(x, N_NUMBER);
+		/* FIXME: 'rem' should be 'em' of root element. This is a bad approximation. */
+		if (p[0] == 'r' && p[1] == 'e' && p[2] == 'm' && p[3] == 0)
+			return make_number(x * 16, N_LENGTH);
+
+		/* FIXME: 'ch' should be width of '0' character. This is an approximation. */
+		if (p[0] == 'c' && p[1] == 'h' && p[2] == 0)
+			return make_number(x / 2, N_LENGTH);
+
+		return make_number(x, N_LENGTH);
+	}
+
+	if (value->type == CSS_KEYWORD)
+	{
+		if (!strcmp(value->data, "auto"))
+			return make_number(0, N_AUTO);
 	}
 
 	return make_number(initial, initial_unit);
@@ -717,14 +959,14 @@ border_width_from_property(fz_css_match *match, const char *property)
 	if (value)
 	{
 		if (!strcmp(value->data, "thin"))
-			return make_number(1, N_NUMBER);
+			return make_number(1, N_LENGTH);
 		if (!strcmp(value->data, "medium"))
-			return make_number(2, N_NUMBER);
+			return make_number(2, N_LENGTH);
 		if (!strcmp(value->data, "thick"))
-			return make_number(4, N_NUMBER);
-		return number_from_value(value, 0, N_NUMBER);
+			return make_number(4, N_LENGTH);
+		return number_from_value(value, 0, N_LENGTH);
 	}
-	return make_number(2, N_NUMBER); /* initial: 'medium' */
+	return make_number(2, N_LENGTH); /* initial: 'medium' */
 }
 
 static int
@@ -741,24 +983,28 @@ border_style_from_property(fz_css_match *match, const char *property)
 }
 
 float
-fz_from_css_number(fz_css_number number, float em, float width)
+fz_from_css_number(fz_css_number number, float em, float percent_value, float auto_value)
 {
 	switch (number.unit) {
 	default:
 	case N_NUMBER: return number.value;
+	case N_LENGTH: return number.value;
 	case N_SCALE: return number.value * em;
-	case N_PERCENT: return number.value * 0.01 * width;
+	case N_PERCENT: return number.value * 0.01f * percent_value;
+	case N_AUTO: return auto_value;
 	}
 }
 
 float
-fz_from_css_number_scale(fz_css_number number, float scale, float em, float width)
+fz_from_css_number_scale(fz_css_number number, float scale)
 {
 	switch (number.unit) {
 	default:
 	case N_NUMBER: return number.value * scale;
-	case N_SCALE: return number.value * em;
-	case N_PERCENT: return number.value * 0.01 * width;
+	case N_LENGTH: return number.value;
+	case N_SCALE: return number.value * scale;
+	case N_PERCENT: return number.value * 0.01f * scale;
+	case N_AUTO: return scale;
 	}
 }
 
@@ -766,10 +1012,10 @@ static fz_css_color
 make_color(int r, int g, int b, int a)
 {
 	fz_css_color c;
-	c.r = r;
-	c.g = g;
-	c.b = b;
-	c.a = a;
+	c.r = r < 0 ? 0 : r > 255 ? 255 : r;
+	c.g = g < 0 ? 0 : g > 255 ? 255 : g;
+	c.b = b < 0 ? 0 : b > 255 ? 255 : b;
+	c.a = a < 0 ? 0 : a > 255 ? 255 : a;
 	return c;
 }
 
@@ -785,13 +1031,45 @@ color_from_value(fz_css_value *value, fz_css_color initial)
 {
 	if (!value)
 		return initial;
-	if (value->type == CSS_COLOR)
+
+	if (value->type == CSS_HASH)
 	{
-		int r = tohex(value->data[0]) * 16 + tohex(value->data[1]);
-		int g = tohex(value->data[2]) * 16 + tohex(value->data[3]);
-		int b = tohex(value->data[4]) * 16 + tohex(value->data[5]);
+		int r, g, b;
+		size_t n;
+hex_color:
+		n = strlen(value->data);
+		if (n == 3)
+		{
+			r = tohex(value->data[0]) * 16 + tohex(value->data[0]);
+			g = tohex(value->data[1]) * 16 + tohex(value->data[1]);
+			b = tohex(value->data[2]) * 16 + tohex(value->data[2]);
+		}
+		else if (n == 6)
+		{
+			r = tohex(value->data[0]) * 16 + tohex(value->data[1]);
+			g = tohex(value->data[2]) * 16 + tohex(value->data[3]);
+			b = tohex(value->data[4]) * 16 + tohex(value->data[5]);
+		}
+		else
+		{
+			r = g = b = 0;
+		}
 		return make_color(r, g, b, 255);
 	}
+
+	if (value->type == '(' && !strcmp(value->data, "rgb"))
+	{
+		fz_css_value *vr, *vg, *vb;
+		int r, g, b;
+		vr = value->args;
+		vg = vr && vr->next ? vr->next->next : NULL; /* skip the ',' nodes */
+		vb = vg && vg->next ? vg->next->next : NULL; /* skip the ',' nodes */
+		r = fz_from_css_number(number_from_value(vr, 0, N_NUMBER), 255, 255, 0);
+		g = fz_from_css_number(number_from_value(vg, 0, N_NUMBER), 255, 255, 0);
+		b = fz_from_css_number(number_from_value(vb, 0, N_NUMBER), 255, 255, 0);
+		return make_color(r, g, b, 255);
+	}
+
 	if (value->type == CSS_KEYWORD)
 	{
 		if (!strcmp(value->data, "transparent"))
@@ -830,7 +1108,7 @@ color_from_value(fz_css_value *value, fz_css_color initial)
 			return make_color(0xC0, 0xC0, 0xC0, 255);
 		if (!strcmp(value->data, "gray"))
 			return make_color(0x80, 0x80, 0x80, 255);
-		return make_color(0, 0, 0, 255);
+		goto hex_color; /* last ditch attempt: maybe it's a #XXXXXX color without the # */
 	}
 	return initial;
 }
@@ -855,6 +1133,14 @@ fz_get_css_match_display(fz_css_match *match)
 			return DIS_BLOCK;
 		if (!strcmp(value->data, "list-item"))
 			return DIS_LIST_ITEM;
+		if (!strcmp(value->data, "inline-block"))
+			return DIS_INLINE_BLOCK;
+		if (!strcmp(value->data, "table"))
+			return DIS_TABLE;
+		if (!strcmp(value->data, "table-row"))
+			return DIS_TABLE_ROW;
+		if (!strcmp(value->data, "table-cell"))
+			return DIS_TABLE_CELL;
 	}
 	return DIS_INLINE;
 }
@@ -874,15 +1160,46 @@ white_space_from_property(fz_css_match *match)
 	return WS_NORMAL;
 }
 
+static int
+visibility_from_property(fz_css_match *match)
+{
+	fz_css_value *value = value_from_property(match, "visibility");
+	if (value)
+	{
+		if (!strcmp(value->data, "visible")) return V_VISIBLE;
+		else if (!strcmp(value->data, "hidden")) return V_HIDDEN;
+		else if (!strcmp(value->data, "collapse")) return V_COLLAPSE;
+	}
+	return V_VISIBLE;
+}
+
+static int
+page_break_from_property(fz_css_match *match, char *prop)
+{
+	fz_css_value *value = value_from_property(match, prop);
+	if (value)
+	{
+		if (!strcmp(value->data, "auto")) return PB_AUTO;
+		else if (!strcmp(value->data, "always")) return PB_ALWAYS;
+		else if (!strcmp(value->data, "avoid")) return PB_AVOID;
+		else if (!strcmp(value->data, "left")) return PB_LEFT;
+		else if (!strcmp(value->data, "right")) return PB_RIGHT;
+	}
+	return PB_AUTO;
+}
+
 void
 fz_default_css_style(fz_context *ctx, fz_css_style *style)
 {
 	memset(style, 0, sizeof *style);
+	style->visibility = V_VISIBLE;
 	style->text_align = TA_LEFT;
 	style->vertical_align = VA_BASELINE;
 	style->white_space = WS_NORMAL;
 	style->list_style_type = LST_DISC;
 	style->font_size = make_number(1, N_SCALE);
+	style->width = make_number(0, N_AUTO);
+	style->height = make_number(0, N_AUTO);
 }
 
 void
@@ -895,7 +1212,10 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 
 	fz_default_css_style(ctx, style);
 
+	style->visibility = visibility_from_property(match);
 	style->white_space = white_space_from_property(match);
+	style->page_break_before = page_break_from_property(match, "page-break-before");
+	style->page_break_after = page_break_from_property(match, "page-break-after");
 
 	value = value_from_property(match, "text-align");
 	if (value)
@@ -914,6 +1234,8 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 		else if (!strcmp(value->data, "super")) style->vertical_align = VA_SUPER;
 		else if (!strcmp(value->data, "top")) style->vertical_align = VA_TOP;
 		else if (!strcmp(value->data, "bottom")) style->vertical_align = VA_BOTTOM;
+		else if (!strcmp(value->data, "text-top")) style->vertical_align = VA_TEXT_TOP;
+		else if (!strcmp(value->data, "text-bottom")) style->vertical_align = VA_TEXT_BOTTOM;
 	}
 
 	value = value_from_property(match, "font-size");
@@ -928,7 +1250,7 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 		else if (!strcmp(value->data, "xx-small")) style->font_size = make_number(0.69f, N_SCALE);
 		else if (!strcmp(value->data, "larger")) style->font_size = make_number(1.2f, N_SCALE);
 		else if (!strcmp(value->data, "smaller")) style->font_size = make_number(1/1.2f, N_SCALE);
-		else style->font_size = number_from_value(value, 12, N_NUMBER);
+		else style->font_size = number_from_value(value, 12, N_LENGTH);
 	}
 	else
 	{
@@ -958,51 +1280,253 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 
 	style->line_height = number_from_property(match, "line-height", 1.2f, N_SCALE);
 
-	style->text_indent = number_from_property(match, "text-indent", 0, N_NUMBER);
+	style->text_indent = number_from_property(match, "text-indent", 0, N_LENGTH);
 
-	style->margin[0] = number_from_property(match, "margin-top", 0, N_NUMBER);
-	style->margin[1] = number_from_property(match, "margin-right", 0, N_NUMBER);
-	style->margin[2] = number_from_property(match, "margin-bottom", 0, N_NUMBER);
-	style->margin[3] = number_from_property(match, "margin-left", 0, N_NUMBER);
+	style->width = number_from_property(match, "width", 0, N_AUTO);
+	style->height = number_from_property(match, "height", 0, N_AUTO);
 
-	style->padding[0] = number_from_property(match, "padding-top", 0, N_NUMBER);
-	style->padding[1] = number_from_property(match, "padding-right", 0, N_NUMBER);
-	style->padding[2] = number_from_property(match, "padding-bottom", 0, N_NUMBER);
-	style->padding[3] = number_from_property(match, "padding-left", 0, N_NUMBER);
+	style->margin[0] = number_from_property(match, "margin-top", 0, N_LENGTH);
+	style->margin[1] = number_from_property(match, "margin-right", 0, N_LENGTH);
+	style->margin[2] = number_from_property(match, "margin-bottom", 0, N_LENGTH);
+	style->margin[3] = number_from_property(match, "margin-left", 0, N_LENGTH);
+
+	style->padding[0] = number_from_property(match, "padding-top", 0, N_LENGTH);
+	style->padding[1] = number_from_property(match, "padding-right", 0, N_LENGTH);
+	style->padding[2] = number_from_property(match, "padding-bottom", 0, N_LENGTH);
+	style->padding[3] = number_from_property(match, "padding-left", 0, N_LENGTH);
 
 	style->color = color_from_property(match, "color", black);
 	style->background_color = color_from_property(match, "background-color", transparent);
 
-	style->border_style[0] = border_style_from_property(match, "border-style-top");
-	style->border_style[1] = border_style_from_property(match, "border-style-right");
-	style->border_style[2] = border_style_from_property(match, "border-style-bottom");
-	style->border_style[3] = border_style_from_property(match, "border-style-left");
+	style->border_style_0 = border_style_from_property(match, "border-top-style");
+	style->border_style_1 = border_style_from_property(match, "border-right-style");
+	style->border_style_2 = border_style_from_property(match, "border-bottom-style");
+	style->border_style_3 = border_style_from_property(match, "border-left-style");
 
-	style->border_color[0] = color_from_property(match, "border-color-top", transparent);
-	style->border_color[1] = color_from_property(match, "border-color-right", transparent);
-	style->border_color[2] = color_from_property(match, "border-color-bottom", transparent);
-	style->border_color[3] = color_from_property(match, "border-color-left", transparent);
+	style->border_color[0] = color_from_property(match, "border-top-color", style->color);
+	style->border_color[1] = color_from_property(match, "border-right-color", style->color);
+	style->border_color[2] = color_from_property(match, "border-bottom-color", style->color);
+	style->border_color[3] = color_from_property(match, "border-left-color", style->color);
 
-	style->border_width[0] = border_width_from_property(match, "border-width-top");
-	style->border_width[1] = border_width_from_property(match, "border-width-right");
-	style->border_width[2] = border_width_from_property(match, "border-width-bottom");
-	style->border_width[3] = border_width_from_property(match, "border-width-left");
+	style->border_width[0] = border_width_from_property(match, "border-top-width");
+	style->border_width[1] = border_width_from_property(match, "border-right-width");
+	style->border_width[2] = border_width_from_property(match, "border-bottom-width");
+	style->border_width[3] = border_width_from_property(match, "border-left-width");
 
 	{
-		const char *font_family = string_from_property(match, "font-family", "serif");
-		const char *font_variant = string_from_property(match, "font-variant", "normal");
-		const char *font_style = string_from_property(match, "font-style", "normal");
 		const char *font_weight = string_from_property(match, "font-weight", "normal");
-		style->font = fz_load_html_font(ctx, set, font_family, font_variant, font_style, font_weight);
+		const char *font_style = string_from_property(match, "font-style", "normal");
+		const char *font_variant = string_from_property(match, "font-variant", "normal");
+		int is_bold = is_bold_from_font_weight(font_weight);
+		int is_italic = is_italic_from_font_style(font_style);
+		style->small_caps = !strcmp(font_variant, "small-caps");
+		value = value_from_property(match, "font-family");
+		while (value)
+		{
+			if (strcmp(value->data, ",") != 0)
+			{
+				style->font = fz_load_html_font(ctx, set, value->data, is_bold, is_italic, style->small_caps);
+				if (style->font)
+					break;
+			}
+			value = value->next;
+		}
+		if (!style->font)
+			style->font = fz_load_html_font(ctx, set, "serif", is_bold, is_italic, style->small_caps);
 	}
 }
 
+#ifdef DEBUG_CSS_SPLAY
+static void
+do_verify_splay(const fz_css_style_splay *x)
+{
+	printf("%x<", x);
+	if (x->lt)
+	{
+		assert(memcmp(&x->lt->style, &x->style, sizeof(x->style)) < 0);
+		assert(x->lt->up == x);
+		do_verify_splay(x->lt);
+	}
+	printf(",");
+	if (x->gt)
+	{
+		assert(memcmp(&x->gt->style, &x->style, sizeof(x->style)) > 0);
+		assert(x->gt->up == x);
+		do_verify_splay(x->gt);
+	}
+	printf(">\n");
+}
+
+static void
+verify_splay(const fz_css_style_splay *x)
+{
+	if (x == NULL)
+		return;
+	assert(x->up == NULL);
+	do_verify_splay(x);
+	printf("-----\n");
+}
+#endif
+
+/* Lookup style in the splay tree, returning a pointer to the found instance
+ * if there is one, creating and inserting (and moving to root) one if there
+ * is not. */
+const fz_css_style *
+fz_css_enlist(fz_context *ctx, const fz_css_style *style, fz_css_style_splay **tree, fz_pool *pool)
+{
+	fz_css_style_splay **current = tree;
+	fz_css_style_splay *x;
+	fz_css_style_splay *y = NULL;
+
+	/* Search for a match in the tree, if there is one, or for
+	 * the insertion point, if there is not. */
+	while (*current != NULL)
+	{
+		int cmp = memcmp(style, &(*current)->style, sizeof(*style));
+		if (cmp == 0)
+		{
+			/* We have a match - break out and do move to root. */
+			break;
+		}
+		y = (*current);
+		if (cmp < 0)
+			current = &y->lt;
+		else
+			current = &y->gt;
+	}
+	/* Create one if needed */
+	if (*current == NULL)
+	{
+		x = *current = fz_pool_alloc(ctx, pool, sizeof(*y));
+		x->style = *style;
+		x->up = y;
+		x->lt = NULL;
+		x->gt = NULL;
+	}
+	else
+		x = *current;
+	/* Now move to root */
+	/*
+	The splaying steps used:
+
+	Case 1:	|a)       z              x             b)     z                   x
+		|     y       D  =>  A       y            A       y           y       D
+		|   x   C                  B   z                B   x  =>  z     C
+		|  A B                        C D                  C D    A B
+
+	Case 2:	|a)       z              x             b)     z                   x
+		|     y       D  =>   y     z             A       y    =>     z       y
+		|   A   x            A B   C D                  x   D        A B     C D
+		|      B C                                     B C
+
+	Case 3:	|a)       y              x             b)     y                   x
+		|      x     C   =>   A     y              A     x      =>     y     C
+		|     A B                  B C                  B C           A B
+	*/
+#ifdef DEBUG_CSS_SPLAY
+	printf("BEFORE\n");
+	verify_splay(*tree);
+#endif
+	while ((y = x->up) != NULL ) /* While we're not at the root */
+	{
+		fz_css_style_splay *z = y->up;
+		y->up = x;
+		if (z == NULL)
+		{
+			if (y->lt == x)	/* Case 3a */
+			{
+				y->lt = x->gt;
+				if (y->lt)
+					y->lt->up = y;
+				x->gt = y;
+			}
+			else /* Case 3b */
+			{
+				y->gt = x->lt;
+				if (y->gt)
+					y->gt->up = y;
+				x->lt = y;
+			}
+			x->up = NULL;
+			break;
+		}
+		x->up = z->up;
+		if (z->up)
+		{
+			if (z->up->lt == z)
+				z->up->lt = x;
+			else
+				z->up->gt = x;
+		}
+		if (z->lt == y)
+		{
+			if (y->lt == x) /* Case 1a */
+			{
+				z->lt = y->gt;
+				if (z->lt)
+					z->lt->up = z;
+				y->lt = x->gt;
+				if (y->lt)
+					y->lt->up = y;
+				y->gt = z;
+				z->up = y;
+				x->gt = y;
+			}
+			else /* Case 2a */
+			{
+				y->gt = x->lt;
+				if (y->gt)
+					y->gt->up = y;
+				z->lt = x->gt;
+				if (z->lt)
+					z->lt->up = z;
+				x->lt = y;
+				x->gt = z;
+				z->up = x;
+			}
+		}
+		else
+		{
+			if (y->gt == x) /* Case 1b */
+			{
+				z->gt = y->lt;
+				if (z->gt)
+					z->gt->up = z;
+				y->gt = x->lt;
+				if (y->gt)
+					y->gt->up = y;
+				y->lt = z;
+				z->up = y;
+				x->lt = y;
+			}
+			else /* Case 2b */
+			{
+				z->gt = x->lt;
+				if (z->gt)
+					z->gt->up = z;
+				y->lt = x->gt;
+				if (y->lt)
+					y->lt->up = y;
+				x->gt = y;
+				x->lt = z;
+				z->up = x;
+			}
+		}
+	}
+
+	*tree = x;
+#ifdef DEBUG_CSS_SPLAY
+	printf("AFTER\n");
+	verify_splay(x);
+#endif
+
+	return &x->style;
+}
 /*
  * Pretty printing
  */
 
-void
-print_value(fz_css_value *val)
+static void print_value(fz_css_value *val)
 {
 	printf("%s", val->data);
 	if (val->args)
@@ -1018,16 +1542,16 @@ print_value(fz_css_value *val)
 	}
 }
 
-void
-print_property(fz_css_property *prop)
+static void print_property(fz_css_property *prop)
 {
 	printf("\t%s: ", prop->name);
 	print_value(prop->value);
-	printf(" !%d;\n", prop->spec);
+	if (prop->important)
+		printf(" !important");
+	printf(";\n");
 }
 
-void
-print_condition(fz_css_condition *cond)
+static void print_condition(fz_css_condition *cond)
 {
 	if (cond->type == '=')
 		printf("[%s=%s]", cond->key, cond->val);
@@ -1039,19 +1563,16 @@ print_condition(fz_css_condition *cond)
 		print_condition(cond->next);
 }
 
-void
-print_selector(fz_css_selector *sel)
+static void print_selector(fz_css_selector *sel)
 {
 	if (sel->combine)
 	{
-putchar('(');
 		print_selector(sel->left);
 		if (sel->combine == ' ')
 			printf(" ");
 		else
 			printf(" %c ", sel->combine);
 		print_selector(sel->right);
-putchar(')');
 	}
 	else if (sel->name)
 		printf("%s", sel->name);
@@ -1063,8 +1584,7 @@ putchar(')');
 	}
 }
 
-void
-print_rule(fz_css_rule *rule)
+static void print_rule(fz_css_rule *rule)
 {
 	fz_css_selector *sel;
 	fz_css_property *prop;
@@ -1072,7 +1592,7 @@ print_rule(fz_css_rule *rule)
 	for (sel = rule->selector; sel; sel = sel->next)
 	{
 		print_selector(sel);
-		printf(" !%d", selector_specificity(sel));
+		printf(" /* %d */", selector_specificity(sel, 0));
 		if (sel->next)
 			printf(", ");
 	}
@@ -1086,34 +1606,12 @@ print_rule(fz_css_rule *rule)
 }
 
 void
-print_rules(fz_css_rule *rule)
+fz_debug_css(fz_context *ctx, fz_css *css)
 {
+	fz_css_rule *rule = css->rule;
 	while (rule)
 	{
 		print_rule(rule);
 		rule = rule->next;
 	}
-}
-
-void
-print_style(fz_css_style *style)
-{
-	printf("style {\n");
-	printf("\tfont-size = %g%c;\n", style->font_size.value, style->font_size.unit);
-	printf("\tfont = %s;\n", style->font->name);
-	printf("\tline-height = %g%c;\n", style->line_height.value, style->line_height.unit);
-	printf("\ttext-indent = %g%c;\n", style->text_indent.value, style->text_indent.unit);
-	printf("\ttext-align = %d;\n", style->text_align);
-	printf("\tvertical-align = %d;\n", style->vertical_align);
-	printf("\tmargin = %g%c %g%c %g%c %g%c;\n",
-		style->margin[0].value, style->margin[0].unit,
-		style->margin[1].value, style->margin[1].unit,
-		style->margin[2].value, style->margin[2].unit,
-		style->margin[3].value, style->margin[3].unit);
-	printf("\tpadding = %g%c %g%c %g%c %g%c;\n",
-		style->padding[0].value, style->padding[0].unit,
-		style->padding[1].value, style->padding[1].unit,
-		style->padding[2].value, style->padding[2].unit,
-		style->padding[3].value, style->padding[3].unit);
-	printf("}\n");
 }

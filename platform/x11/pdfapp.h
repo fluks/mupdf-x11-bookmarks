@@ -5,21 +5,25 @@
 #include "mupdf/pdf.h"
 #include "mupdf/bookmark.h"
 
+#include <time.h>
+
 /*
  * Utility object for handling a pdf application / view
  * Takes care of PDF loading and displaying and navigation,
  * uses a number of callbacks to the GUI app.
  */
 
-/* 25% .. 400% */
+/* 25% .. 1600% */
 #define MINRES 18
-#define MAXRES 288
+#define MAXRES 1152
 
 typedef struct pdfapp_s pdfapp_t;
 
 enum { ARROW, HAND, WAIT, CARET };
 
 enum { DISCARD, SAVE, CANCEL };
+
+enum { QUERY_NO, QUERY_YES };
 
 extern void winwarn(pdfapp_t*, char *s);
 extern void winerror(pdfapp_t*, char *s);
@@ -29,7 +33,7 @@ extern void winrepaint(pdfapp_t*);
 extern void winrepaintsearch(pdfapp_t*);
 extern char *winpassword(pdfapp_t*, char *filename);
 extern char *wintextinput(pdfapp_t*, char *inittext, int retry);
-extern int winchoiceinput(pdfapp_t*, int nopts, char *opts[], int *nvals, char *vals[]);
+extern int winchoiceinput(pdfapp_t*, int nopts, const char *opts[], int *nvals, const char *vals[]);
 extern void winopenuri(pdfapp_t*, char *s);
 extern void wincursor(pdfapp_t*, int curs);
 extern void windocopy(pdfapp_t*);
@@ -38,12 +42,14 @@ extern void winclose(pdfapp_t*);
 extern void winhelp(pdfapp_t*);
 extern void winfullscreen(pdfapp_t*, int state);
 extern int winsavequery(pdfapp_t*);
+extern int winquery(pdfapp_t*, const char*);
+extern int wingetcertpath(pdfapp_t *, char *buf, int len);
 extern int wingetsavepath(pdfapp_t*, char *buf, int len);
 extern void winalert(pdfapp_t *, pdf_alert_event *alert);
 extern void winprint(pdfapp_t *);
 extern void winadvancetimer(pdfapp_t *, float duration);
-extern void winreplacefile(char *source, char *target);
-extern void wincopyfile(char *source, char *target);
+extern void winreplacefile(pdfapp_t *, char *source, char *target);
+extern void wincopyfile(pdfapp_t *, char *source, char *target);
 extern void winreloadpage(pdfapp_t *);
 
 struct pdfapp_s
@@ -58,17 +64,24 @@ struct pdfapp_s
 	float layout_w;
 	float layout_h;
 	float layout_em;
+	char *layout_css;
+	int layout_use_doc_css;
 
 	int pagecount;
 
 	/* current view params */
-	int resolution;
+	float default_resolution;
+	float resolution;
 	int rotate;
 	fz_pixmap *image;
+	int imgw, imgh;
 	int grayscale;
 	fz_colorspace *colorspace;
 	int invert;
-	int tint, tint_r, tint_g, tint_b;
+	int tint, tint_white;
+	int useicc;
+	int useseparations;
+	int aalevel;
 
 	/* presentation mode */
 	int presentation_mode;
@@ -86,11 +99,13 @@ struct pdfapp_s
 	fz_rect page_bbox;
 	fz_display_list *page_list;
 	fz_display_list *annotations_list;
-	fz_text_page *page_text;
-	fz_text_sheet *page_sheet;
+	fz_stext_page *page_text;
 	fz_link *page_links;
 	int errored;
 	int incomplete;
+
+	/* separations */
+	fz_separations *seps;
 
 	/* snapback history */
 	int hist[256];
@@ -128,7 +143,7 @@ struct pdfapp_s
 	int searchdir;
 	char search[512];
 	int searchpage;
-	fz_rect hit_bbox[512];
+	fz_quad hit_bbox[512];
 	int hit_count;
 
 	/* client context storage */
@@ -145,8 +160,9 @@ struct pdfapp_s
 };
 
 void pdfapp_init(fz_context *ctx, pdfapp_t *app);
+void pdfapp_setresolution(pdfapp_t *app, int res);
 void pdfapp_open(pdfapp_t *app, char *filename, int reload);
-void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int bps);
+void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps);
 void pdfapp_close(pdfapp_t *app);
 int pdfapp_preclose(pdfapp_t *app);
 void pdfapp_reloadfile(pdfapp_t *app);
@@ -164,9 +180,12 @@ void pdfapp_autozoom_horizontal(pdfapp_t *app);
 void pdfapp_autozoom_vertical(pdfapp_t *app);
 void pdfapp_autozoom(pdfapp_t *app);
 
-void pdfapp_invert(pdfapp_t *app, const fz_rect *rect);
+void pdfapp_invert(pdfapp_t *app, fz_rect rect);
 void pdfapp_inverthit(pdfapp_t *app);
 
 void pdfapp_postblit(pdfapp_t *app);
+
+void pdfapp_warn(pdfapp_t *app, const char *fmt, ...);
+void pdfapp_error(pdfapp_t *app, char *msg);
 
 #endif

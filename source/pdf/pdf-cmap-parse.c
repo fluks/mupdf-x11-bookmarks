@@ -1,13 +1,16 @@
+#include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
+
+#include <string.h>
 
 /*
  * CMap parser
  */
 
 static int
-pdf_code_from_string(char *buf, int len)
+pdf_code_from_string(char *buf, size_t len)
 {
-	int a = 0;
+	unsigned int a = 0;
 	while (len--)
 		a = (a << 8) | *(unsigned char *)buf++;
 	return a;
@@ -137,7 +140,6 @@ pdf_parse_bf_range_array(fz_context *ctx, pdf_cmap *cmap, fz_stream *file, pdf_l
 {
 	pdf_token tok;
 	int dst[256];
-	int i;
 
 	while (1)
 	{
@@ -152,7 +154,8 @@ pdf_parse_bf_range_array(fz_context *ctx, pdf_cmap *cmap, fz_stream *file, pdf_l
 
 		if (buf->len / 2)
 		{
-			int len = fz_mini(buf->len / 2, nelem(dst));
+			size_t i;
+			size_t len = fz_minz(buf->len / 2, nelem(dst));
 			for (i = 0; i < len; i++)
 				dst[i] = pdf_code_from_string(&buf->scratch[i * 2], 2);
 
@@ -204,18 +207,18 @@ pdf_parse_bf_range(fz_context *ctx, pdf_cmap *cmap, fz_stream *file, pdf_lexbuf 
 			else
 			{
 				int dststr[256];
-				int i;
+				size_t i;
 
 				if (buf->len / 2)
 				{
-					int len = fz_mini(buf->len / 2, nelem(dststr));
+					size_t len = fz_minz(buf->len / 2, nelem(dststr));
 					for (i = 0; i < len; i++)
 						dststr[i] = pdf_code_from_string(&buf->scratch[i * 2], 2);
 
 					while (lo <= hi)
 					{
-						dststr[i-1] ++;
 						pdf_map_one_to_many(ctx, cmap, lo, dststr, i);
+						dststr[i-1] ++;
 						lo ++;
 					}
 				}
@@ -240,7 +243,6 @@ pdf_parse_bf_char(fz_context *ctx, pdf_cmap *cmap, fz_stream *file, pdf_lexbuf *
 	pdf_token tok;
 	int dst[256];
 	int src;
-	int i;
 
 	while (1)
 	{
@@ -261,7 +263,8 @@ pdf_parse_bf_char(fz_context *ctx, pdf_cmap *cmap, fz_stream *file, pdf_lexbuf *
 
 		if (buf->len / 2)
 		{
-			int len = fz_mini(buf->len / 2, nelem(dst));
+			size_t i;
+			size_t len = fz_minz(buf->len / 2, nelem(dst));
 			for (i = 0; i < len; i++)
 				dst[i] = pdf_code_from_string(&buf->scratch[i * 2], 2);
 			pdf_map_one_to_many(ctx, cmap, src, dst, i);
@@ -337,7 +340,7 @@ pdf_load_cmap(fz_context *ctx, fz_stream *file)
 	fz_catch(ctx)
 	{
 		pdf_drop_cmap(ctx, cmap);
-		fz_rethrow_message(ctx, "syntaxerror in cmap");
+		fz_rethrow(ctx);
 	}
 
 	return cmap;
