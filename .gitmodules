@@ -1,30 +1,30 @@
 [submodule "thirdparty/jbig2dec"]
 	path = thirdparty/jbig2dec
-	url = ../jbig2dec.git
+	url = git://git.ghostscript.com/jbig2dec.git
 [submodule "thirdparty/mujs"]
 	path = thirdparty/mujs
-	url = ../mujs.git
+	url = git://git.ghostscript.com/mujs.git
 [submodule "thirdparty/freetype"]
 	path = thirdparty/freetype
-	url = ../thirdparty-freetype2.git
+	url = git://git.ghostscript.com/thirdparty-freetype2.git
 [submodule "thirdparty/harfbuzz"]
 	path = thirdparty/harfbuzz
-	url = ../thirdparty-harfbuzz.git
+	url = git://git.ghostscript.com/thirdparty-harfbuzz.git
 [submodule "thirdparty/jpeg"]
 	path = thirdparty/libjpeg
-	url = ../thirdparty-libjpeg.git
+	url = git://git.ghostscript.com/thirdparty-libjpeg.git
 [submodule "thirdparty/lcms2"]
 	path = thirdparty/lcms2
-	url = ../thirdparty-lcms2.git
+	url = git://git.ghostscript.com/thirdparty-lcms2.git
 [submodule "thirdparty/openjpeg"]
 	path = thirdparty/openjpeg
-	url = ../thirdparty-openjpeg.git
+	url = git://git.ghostscript.com/thirdparty-openjpeg.git
 [submodule "thirdparty/zlib"]
 	path = thirdparty/zlib
-	url = ../thirdparty-zlib.git
+	url = git://git.ghostscript.com/thirdparty-zlib.git
 [submodule "thirdparty/curl"]
 	path = thirdparty/curl
-	url = ../thirdparty-curl.git
+	url = git://git.ghostscript.com/thirdparty-curl.git
 [submodule "thirdparty/freeglut"]
 	path = thirdparty/freeglut
-	url = ../thirdparty-freeglut.git
+	url = git://git.ghostscript.com/thirdparty-freeglut.git
